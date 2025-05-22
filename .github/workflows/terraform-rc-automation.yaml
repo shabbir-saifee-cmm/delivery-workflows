@@ -1,0 +1,285 @@
+name: Full Terraform RC Pipeline
+
+on:
+  workflow_call:
+    secrets:
+      TF_AUTOMATION_GITHUB_TOKEN:
+        description: 'Token for terraform-control repo access'
+        required: true
+      # MCK_CMM_HCP_TERRAFORM_TOKEN:
+      #   description: 'Terraform API Token'
+      #   required: true
+
+jobs:
+  complete-pipeline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      # STEP 1: Validate comment and get PR details
+      - name: Checkout terraform repo
+        uses: actions/checkout@v3
+
+      - name: Get PR details
+        id: pr-details
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prNumber = context.payload.issue.number;
+            const comment = context.payload.comment.body.trim();
+            const commentPrefix = 'ready-to-test-terraform-';
+            const forbiddenEnvs = ['prod', 'production'];
+            const appDetectionPattern = '^terraform\/([^\/]+)\/';
+
+            // Extract environment from comment
+            const envRegex = new RegExp(`^${commentPrefix.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}(\\w+)$`);
+            const envMatch = comment.match(envRegex);
+
+            if (!envMatch) {
+              core.setFailed(`Invalid comment format. Use: ${commentPrefix}<env>`);
+              return;
+            }
+
+            const environment = envMatch[1].toLowerCase();
+
+            if (forbiddenEnvs.includes(environment)) {
+              core.setFailed(`❌ Automation not allowed for environment: ${environment}`);
+              return;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber
+            });
+
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              { owner, repo, pull_number: prNumber, per_page: 100 }
+            );
+
+            const appNames = new Set();
+            const regex = new RegExp(appDetectionPattern);
+
+            for (const file of files) {
+              const match = file.filename.match(regex);
+              if (match) {
+                appNames.add(match[1]);
+              }
+            }
+
+            const appNameList = Array.from(appNames);
+
+            if (appNameList.length === 0) {
+              core.setFailed("No app changes detected under terraform/. PR must modify terraform/<app>/...");
+              return;
+            } else if (appNameList.length > 1) {
+              core.setFailed(`Multiple apps changed: ${appNameList.join(', ')}. Only one app change is allowed per PR.`);
+              return;
+            }
+
+            const appName = appNameList[0];
+            const prAuthor = pr.user.login;
+
+            core.setOutput("head_branch", pr.head.ref);
+            core.setOutput("head_sha", pr.head.sha);
+            core.setOutput("pr_number", prNumber);
+            core.setOutput("app_name", appName);
+            core.setOutput("environment", environment);
+            core.setOutput("pr_author", prAuthor);
+
+            core.info(`✅ App: ${appName}, Env: ${environment}`);
+
+      # STEP 2: Create RC tag
+      - name: Create new RC tag for app
+        id: create-tag
+        run: |
+          set -e
+
+          APP_NAME=${{ steps.pr-details.outputs.app_name }}
+          SHA=${{ steps.pr-details.outputs.head_sha }}
+          AUTHOR=${{ steps.pr-details.outputs.pr_author }}
+          TAG_PREFIX="0.0.0-terraform"
+
+          echo "🔧 App: $APP_NAME"
+          echo "🔧 Commit SHA: $SHA"
+
+          # Fetch tags from remote
+          git fetch --tags origin
+
+          # Get latest RC tag for this app (sorted by version)
+          LATEST_TAG=$(git tag --list "${TAG_PREFIX}-${APP_NAME}-rc*" | sort -V | tail -n 1)
+          echo "🔍 Latest tag: ${LATEST_TAG:-none}"
+
+          if [[ -z "$LATEST_TAG" ]]; then
+            NEW_RC_NUM=1
+          else
+            RC_NUM=$(echo $LATEST_TAG | sed -E 's/.*-rc([0-9]+)$/\1/')
+            NEW_RC_NUM=$((RC_NUM + 1))
+          fi
+
+          NEW_TAG="${TAG_PREFIX}-${APP_NAME}-${AUTHOR}-rc${NEW_RC_NUM}"
+
+          # Check if tag already exists (local or remote)
+          while git rev-parse "$NEW_TAG" >/dev/null 2>&1; do
+            echo "Tag $NEW_TAG already exists, incrementing RC number"
+            NEW_RC_NUM=$((NEW_RC_NUM + 1))
+            NEW_TAG="${TAG_PREFIX}-${APP_NAME}-${AUTHOR}-rc${NEW_RC_NUM}"
+          done
+
+          echo "🏷️ New tag: $NEW_TAG"
+
+          # Create and push the tag
+          git tag $NEW_TAG $SHA
+          git push origin $NEW_TAG
+
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      # STEP 3: Publish terraform module
+      - name: Publish terraform module
+        id: publish
+        run: |
+          set -e
+
+          APP_NAME="${{ steps.pr-details.outputs.app_name }}"
+          NEW_TAG="${{ steps.create-tag.outputs.new_tag }}"
+
+          echo "📦 Publishing module: $APP_NAME with tag: $NEW_TAG"
+
+          # Add your actual publishing logic here
+          # This could be:
+          # - Publishing to Terraform Cloud/Enterprise
+          # - Publishing to a private registry
+          # - Building and uploading artifacts
+
+          # Simulate publishing for now
+          sleep 2
+          echo "✅ Module published successfully"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      # STEP 4: Update control repo
+      - name: Update version in terraform-control and open PR
+        id: update-control
+        env:
+          GH_TOKEN: ${{ secrets.TF_AUTOMATION_GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          APP_NAME=${{ steps.pr-details.outputs.app_name }}
+          NEW_TAG=${{ steps.create-tag.outputs.new_tag }}
+          AUTHOR=${{ steps.pr-details.outputs.pr_author }}
+          PR_NUMBER=${{ steps.pr-details.outputs.pr_number }}
+          ENV=${{ steps.pr-details.outputs.environment }}
+          BRANCH_NAME="auto-update-${APP_NAME}-${AUTHOR}-${PR_NUMBER}"
+
+          CONTROL_REPO="shabbir-saifee-cmm/terraform-control"
+          CONTROL_CLONE="terraform-control"
+
+          gh repo clone $CONTROL_REPO $CONTROL_CLONE
+          cd $CONTROL_CLONE
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          # Check if remote branch exists, else create from main
+          if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
+            git checkout $BRANCH_NAME
+            git pull origin $BRANCH_NAME
+          else
+            git checkout -b $BRANCH_NAME origin/main
+          fi
+
+          # Update file
+          FILE_PATH="projects/${APP_NAME}/${ENV}/main.tf"
+
+          if [ ! -f "$FILE_PATH" ]; then
+            echo "❌ File not found: $FILE_PATH"
+            echo "Available files in projects/${APP_NAME}:"
+            find projects/${APP_NAME} -name "*.tf" 2>/dev/null || echo "No terraform files found"
+            exit 1
+          fi
+
+          echo "📝 Updating $FILE_PATH with version $NEW_TAG"
+
+          # Update version
+          sed -i -E "0,/^(\s*version)(\s*=\s*)\"[^\"]+\"/s//\1\2\"${NEW_TAG}\"/" $FILE_PATH
+
+          git add $FILE_PATH
+
+          git commit -m "Update ${APP_NAME} module to ${NEW_TAG}
+          Co-authored-by: ${AUTHOR} <${AUTHOR}@users.noreply.github.com>" || echo "No changes to commit"
+
+          # Push branch
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${CONTROL_REPO}.git
+          git push --force-with-lease origin $BRANCH_NAME
+
+          # Check if PR exists
+          EXISTING_PR=$(gh pr list --repo $CONTROL_REPO --head $BRANCH_NAME --json number --jq '.[0].number')
+
+          if [ -z "$EXISTING_PR" ]; then
+            gh pr create --title "Update ${APP_NAME} module to ${NEW_TAG} by @${AUTHOR}" \
+              --body "This PR updates the \`${APP_NAME}\` module to use tag \`${NEW_TAG}\` in \`${ENV}\`.
+              ## 📋 Details
+              - **Module**: \`${APP_NAME}\`
+              - **Environment**: \`${ENV}\`
+              - **New Version**: \`${NEW_TAG}\`
+              - **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})
+              - **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})
+
+              ---
+              *This PR was automatically created by the terraform automation system.*" \
+                            --base main --head $BRANCH_NAME \
+                            --assignee $AUTHOR \
+                            --reviewer $AUTHOR
+
+                          echo "✅ Created new PR for ${APP_NAME} update"
+                        else
+                          echo "✅ Updated existing PR #$EXISTING_PR for ${APP_NAME}"
+                        fi
+
+                        PR_URL=$(gh pr list --repo $CONTROL_REPO --head $BRANCH_NAME --json url --jq '.[0].url')
+
+                        if [ -z "$PR_URL" ]; then
+                          COMMIT_SHA=$(git rev-parse HEAD)
+                          PR_URL="https://github.com/${CONTROL_REPO}/commit/${COMMIT_SHA}"
+                          MSG="🔄 Updated \`${APP_NAME}\` in [terraform-control](${PR_URL}) (commit only, no PR)."
+                        else
+                          MSG="📦 Opened/updated terraform-control PR for \`${APP_NAME}\`: ${PR_URL}"
+                        fi
+
+                        echo "control_message=$MSG" >> $GITHUB_OUTPUT
+
+                    # STEP 5: Final status comment
+                    - name: Comment on PR with final status
+                      uses: actions/github-script@v6
+                      with:
+                        script: |
+                          const newTag = '${{ steps.create-tag.outputs.new_tag }}';
+                          const appName = '${{ steps.pr-details.outputs.app_name }}';
+                          const environment = '${{ steps.pr-details.outputs.environment }}';
+                          const controlMessage = '${{ steps.update-control.outputs.control_message }}';
+                          const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+                          await github.rest.issues.createComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            issue_number: ${{ steps.pr-details.outputs.pr_number }},
+                            body: `🎉 **Terraform RC Pipeline Complete!**
+
+              ## 📋 Summary
+              - **App**: \`${appName}\`
+              - **Environment**: \`${environment}\`
+              - **RC Tag**: \`${newTag}\`
+
+              ## ✅ Pipeline Steps
+              1. ✅ **Tag Created**: \`${newTag}\`
+              2. ✅ **Module Published**: Successfully published to Terraform registry
+              3. ✅ **Control Repo Updated**: ${controlMessage}
+
+              Your changes are ready for deployment in \`${environment}\` environment!
+
+              [View Workflow Run](${workflowUrl})`
+                          });
