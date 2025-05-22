@@ -1,0 +1,157 @@
+name: Artifact Release Workflow
+
+on:
+  workflow_call:
+    inputs:
+      releaseName:
+        type: string
+        description: 'Name of the release'
+        required: true
+      artifactConfig:
+        type: string
+        description: 'Artifact configuration'
+        required: true
+    secrets:
+      MCK_CMM_HCP_TERRAFORM_TOKEN:
+        description: 'Terraform API Token'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write  # needed for repository_dispatch
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Print inputs
+        run: |
+          echo "Release Name: ${{ inputs.tagName }}"
+          echo "Artifact Config: ${{ inputs.artifactConfig }}"
+
+      - name: Validate release name
+        id: validate
+        run: |
+          RC_TAG_NAME_PATTERN="${{ inputs.tagName }}"
+
+          # Check if it's an RC tag format: 0.0.0-terraform-{app}-{author}-rc{num}
+          if [[ "$RELEASE_NAME" =~ ^0\.0\.0-terraform-([a-zA-Z0-9_-]+)-([a-zA-Z0-9_-]+)-rc[0-9]+$ ]]; then
+            APP_NAME="${BASH_REMATCH[1]}"
+            AUTHOR="${BASH_REMATCH[2]}"
+            echo "ARTIFACT_TYPE=terraform" >> $GITHUB_OUTPUT
+            echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+            echo "author=$AUTHOR" >> $GITHUB_OUTPUT
+            echo "is_rc=true" >> $GITHUB_OUTPUT
+            echo "✅ RC tag: $APP_NAME by $AUTHOR"
+
+          else
+            echo "❌ Release name does not follow any supported pattern:"
+            echo "  Production: release/terraform/{app}/{version}"
+            echo "  RC: 0.0.0-terraform-{app}-{author}-rc{num}"
+            echo "  Received: $RELEASE_NAME"
+            exit 1
+          fi
+
+      - name: Get RC metadata (for RC tags only)
+        id: rc-metadata
+        if: steps.validate.outputs.is_rc == 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const tagName = '${{ inputs.tagName }}';
+
+            // Find the PR comment with metadata for this tag
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 50
+            });
+
+            let prMetadata = null;
+
+            for (const issue of issues) {
+              if (!issue.pull_request) continue;
+
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                per_page: 20
+              });
+
+              // Look for metadata comment from workflow 1
+              const metadataComment = comments.find(comment =>
+                comment.body.includes('WORKFLOW_METADATA:') &&
+                comment.body.includes(tagName)
+              );
+
+              if (metadataComment) {
+                const metadataMatch = metadataComment.body.match(/WORKFLOW_METADATA:({.*?})/);
+                if (metadataMatch) {
+                  try {
+                    prMetadata = JSON.parse(metadataMatch[1]);
+                    core.info(`Found metadata for PR #${issue.number}`);
+                    break;
+                  } catch (e) {
+                    core.warning(`Failed to parse metadata: ${e.message}`);
+                  }
+                }
+              }
+            }
+
+            if (prMetadata) {
+              core.setOutput('pr_number', prMetadata.pr_number);
+              core.setOutput('environment', prMetadata.environment);
+              core.setOutput('found', 'true');
+            } else {
+              core.warning('Could not find PR metadata for this RC tag');
+              core.setOutput('found', 'false');
+            }
+
+      - name: publish tf module
+        id: publish
+        run: |
+          APP_NAME="${{ steps.validate.outputs.app_name }}"
+          IS_RC="${{ steps.validate.outputs.is_rc }}"
+
+          echo "📦 Publishing module: $APP_NAME"
+          if [[ "$IS_RC" == "true" ]]; then
+            echo "🧪 Type: Release Candidate"
+          else
+            echo "🚀 Type: Production Release"
+          fi
+
+          # Your actual publishing logic here
+          echo "module will be published"
+
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Dispatch event for control repo update (RC only)
+        if: steps.validate.outputs.is_rc == 'true' && steps.publish.outputs.status == 'success' && steps.rc-metadata.outputs.found == 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const appName = '${{ steps.validate.outputs.app_name }}';
+            const author = '${{ steps.validate.outputs.author }}';
+            const tagName = '${{ inputs.releaseName }}';
+            const environment = '${{ steps.rc-metadata.outputs.environment }}';
+            const prNumber = '${{ steps.rc-metadata.outputs.pr_number }}';
+
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              event_type: 'module_published',
+              client_payload: {
+                app_name: appName,
+                author: author,
+                tag_name: tagName,
+                environment: environment,
+                pr_number: prNumber,
+                source_repo: context.repo.full_name,
+                workflow_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+              }
+            });
+
+            core.info(`🚀 Dispatched module_published event for ${appName}`);
