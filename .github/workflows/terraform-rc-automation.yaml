@@ -253,21 +253,21 @@ jobs:
                         echo "control_message=$MSG" >> $GITHUB_OUTPUT
 
                     # STEP 5: Final status comment
-                    - name: Comment on PR with final status
-                      uses: actions/github-script@v6
-                      with:
-                        script: |
-                          const newTag = '${{ steps.create-tag.outputs.new_tag }}';
-                          const appName = '${{ steps.pr-details.outputs.app_name }}';
-                          const environment = '${{ steps.pr-details.outputs.environment }}';
-                          const controlMessage = '${{ steps.update-control.outputs.control_message }}';
-                          const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+      - name: Comment on PR with final status
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const newTag = '${{ steps.create-tag.outputs.new_tag }}';
+            const appName = '${{ steps.pr-details.outputs.app_name }}';
+            const environment = '${{ steps.pr-details.outputs.environment }}';
+            const controlMessage = '${{ steps.update-control.outputs.control_message }}';
+            const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
-                          await github.rest.issues.createComment({
-                            owner: context.repo.owner,
-                            repo: context.repo.repo,
-                            issue_number: ${{ steps.pr-details.outputs.pr_number }},
-                            body: `🎉 **Terraform RC Pipeline Complete!**
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr-details.outputs.pr_number }},
+              body: `🎉 **Terraform RC Pipeline Complete!**
 
               ## 📋 Summary
               - **App**: \`${appName}\`
