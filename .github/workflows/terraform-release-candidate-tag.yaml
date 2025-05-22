@@ -2,6 +2,10 @@ name: Create RC Tag on Comment
 
 on:
   workflow_call:
+    secrets:
+      PAT_TOKEN:
+        description: 'Personal Access Token with repo permissions'
+        required: true
     outputs:
       created_tag:
         description: 'The tag that was created'
@@ -103,6 +107,8 @@ jobs:
             core.info(`✅ App: ${appName}, Env: ${environment}`);
 
       - name: Create new RC tag for app
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         id: create-tag
         run: |
           set -e
