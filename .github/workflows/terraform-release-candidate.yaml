@@ -3,7 +3,7 @@ name: Artifact Release Workflow
 on:
   workflow_call:
     inputs:
-      releaseName:
+      tagName:
         type: string
         description: 'Name of the release'
         required: true
@@ -135,7 +135,7 @@ jobs:
           script: |
             const appName = '${{ steps.validate.outputs.app_name }}';
             const author = '${{ steps.validate.outputs.author }}';
-            const tagName = '${{ inputs.releaseName }}';
+            const tagName = '${{ inputs.tagName }}';
             const environment = '${{ steps.rc-metadata.outputs.environment }}';
             const prNumber = '${{ steps.rc-metadata.outputs.pr_number }}';
 
