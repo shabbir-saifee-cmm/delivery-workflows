@@ -166,12 +166,12 @@ jobs:
               repo: context.repo.repo,
               issue_number: ${{ steps.pr-details.outputs.pr_number }},
               body: `<!-- WORKFLOW_METADATA:${JSON.stringify(metadata)} -->
-🏷️ Created tag \`${{ steps.create-tag.outputs.new_tag }}\` for app \`${{ steps.pr-details.outputs.app_name }}\`.
+              🏷️ Created tag \`${{ steps.create-tag.outputs.new_tag }}\` for app \`${{ steps.pr-details.outputs.app_name }}\`.
 
-📋 **Details:**
-- **Environment**: \`${{ steps.pr-details.outputs.environment }}\`
-- **Tag**: \`${{ steps.create-tag.outputs.new_tag }}\`
-- **App**: \`${{ steps.pr-details.outputs.app_name }}\`
+              📋 **Details:**
+              - **Environment**: \`${{ steps.pr-details.outputs.environment }}\`
+              - **Tag**: \`${{ steps.create-tag.outputs.new_tag }}\`
+              - **App**: \`${{ steps.pr-details.outputs.app_name }}\`
 
-⏳ Publishing workflow will start automatically...`
-            });
+              ⏳ Publishing workflow will start automatically...`
+                          });
