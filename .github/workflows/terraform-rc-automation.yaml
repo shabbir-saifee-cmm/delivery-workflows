@@ -150,12 +150,12 @@ jobs:
             console.log(`Found ${appNameList.length} changed module(s): ${appNameList.join(', ')}`);
 
             // Store all changed apps and their configurations
-            const changedModules = appNameList.map(appKey => {
-              const appConfig = artifactConfig.terraform[appKey];
+            const changedModules = appNameList.map(moduleKey => {
+              const moduleConfig = artifactConfig.terraform[moduleKey];
               return {
-                appKey: appKey,
-                appName: appConfig.moduleName || appKey,
-                modulePath: appConfig.modulePath
+                moduleKey: moduleKey,
+                moduleName: moduleConfig.moduleName || moduleKey,
+                modulePath: moduleConfig.modulePath
               };
             });
 
@@ -168,7 +168,7 @@ jobs:
             core.setOutput("pr_author", prAuthor);
             core.setOutput("changed_modules", JSON.stringify(changedModules));
 
-            core.info(`✅ Changed modules: ${changedModules.map(m => `${m.appKey} (${m.modulePath})`).join(', ')}, Env: ${environment}`);
+            core.info(`✅ Changed modules: ${changedModules.map(m => `${m.moduleKey} (${m.modulePath})`).join(', ')}, Env: ${environment}`);
 
       # STEP 2: Create RC tags for all changed modules
       - name: Create RC tags for changed modules
@@ -198,21 +198,21 @@ jobs:
 
           echo "$CHANGED_MODULES" | jq -r '.[] | @base64' | while read -r module_data; do
             module=$(echo "$module_data" | base64 -d)
-            APP_KEY=$(echo "$module" | jq -r '.appKey')
-            APP_NAME=$(echo "$module" | jq -r '.appName')
+            MODULE_KEY=$(echo "$module" | jq -r '.moduleKey')
+            MODULE_NAME=$(echo "$module" | jq -r '.moduleName')
             MODULE_PATH=$(echo "$module" | jq -r '.modulePath')
 
-            echo "🏷️ Processing module: $APP_KEY"
-            echo "   - Name: $APP_NAME"
+            echo "🏷️ Processing module: $MODULE_KEY"
+            echo "   - Name: $MODULE_NAME"
             echo "   - Path: $MODULE_PATH"
 
-            # Use app key (not app name) for tag - this is the config key
-            TAG_PREFIX="rc/terraform/${APP_KEY}"
+            # Use module key (not module name) for tag - this is the config key
+            TAG_PREFIX="rc/terraform/${MODULE_KEY}"
             VERSION_PREFIX="0.0.0-${CLEAN_BRANCH}"
 
-            # Get latest RC tag for this app key and branch
+            # Get latest RC tag for this module key and branch
             LATEST_TAG=$(git tag --list "${TAG_PREFIX}/${VERSION_PREFIX}-*" | sort -V | tail -n 1)
-            echo "🔍 Latest tag for ${APP_KEY}: ${LATEST_TAG:-none}"
+            echo "🔍 Latest tag for ${MODULE_KEY}: ${LATEST_TAG:-none}"
 
             if [[ -z "$LATEST_TAG" ]]; then
               NEW_RC_NUM=1
@@ -247,8 +247,8 @@ jobs:
             git push origin $NEW_TAG
 
             # Collect results (append to files since we're in a subshell)
-            echo "${APP_KEY}:${NEW_TAG}" >> /tmp/created_tags.txt
-            echo "${APP_KEY}:${NEW_VERSION}" >> /tmp/created_versions.txt
+            echo "${MODULE_KEY}:${NEW_TAG}" >> /tmp/created_tags.txt
+            echo "${MODULE_KEY}:${NEW_VERSION}" >> /tmp/created_versions.txt
           done
 
           # Read results from files
@@ -281,10 +281,10 @@ jobs:
           # Parse and publish each module
           echo "$CHANGED_MODULES" | jq -r '.[] | @base64' | while read -r module_data; do
             module=$(echo "$module_data" | base64 -d)
-            APP_KEY=$(echo "$module" | jq -r '.appKey')
-            APP_NAME=$(echo "$module" | jq -r '.appName')
+            MODULE_KEY=$(echo "$module" | jq -r '.moduleKey')
+            MODULE_NAME=$(echo "$module" | jq -r '.moduleName')
 
-            echo "📦 Publishing module: $APP_KEY ($APP_NAME)"
+            echo "📦 Publishing module: $MODULE_KEY ($MODULE_NAME)"
 
             # Add your actual publishing logic here for each module
             # This could be:
@@ -346,45 +346,39 @@ jobs:
           # Process each changed module in the same branch
           echo "$CHANGED_MODULES" | jq -r '.[] | @base64' | while read -r module_data; do
             module=$(echo "$module_data" | base64 -d)
-            APP_KEY=$(echo "$module" | jq -r '.appKey')
-            APP_NAME=$(echo "$module" | jq -r '.appName')
+            MODULE_KEY=$(echo "$module" | jq -r '.moduleKey')
+            MODULE_NAME=$(echo "$module" | jq -r '.moduleName')
             MODULE_PATH=$(echo "$module" | jq -r '.modulePath')
 
             # Get tag and version for this module
             NEW_TAG=""
             NEW_VERSION=""
             for pair in "${TAG_PAIRS[@]}"; do
-              if [[ "$pair" == "$APP_KEY:"* ]]; then
+              if [[ "$pair" == "$MODULE_KEY:"* ]]; then
                 NEW_TAG="${pair#*:}"
                 break
               fi
             done
             for pair in "${VERSION_PAIRS[@]}"; do
-              if [[ "$pair" == "$APP_KEY:"* ]]; then
+              if [[ "$pair" == "$MODULE_KEY:"* ]]; then
                 NEW_VERSION="${pair#*:}"
                 break
               fi
             done
 
-            echo "🔄 Processing control repo update for: $APP_KEY"
-            echo "   - Module Name: $APP_NAME"
+            echo "🔄 Processing control repo update for: $MODULE_KEY"
+            echo "   - Module Name: $MODULE_NAME"
             echo "   - New Tag: $NEW_TAG"
             echo "   - New Version: $NEW_VERSION"
 
-            # Update file - use APP_KEY for directory structure
-            FILE_PATH="projects/${APP_KEY}/${ENV}/main.tf"
+            # Update file - use MODULE_NAME for directory structure
+            FILE_PATH="projects/${MODULE_NAME}/${ENV}/main.tf"
 
             if [ ! -f "$FILE_PATH" ]; then
               echo "❌ File not found: $FILE_PATH"
-              echo "Available files in projects/${APP_KEY}:"
-              find projects/${APP_KEY} -name "*.tf" 2>/dev/null || echo "No terraform files found"
-
-              # Try with APP_NAME if APP_KEY doesn't work
-              FILE_PATH="projects/${APP_NAME}/${ENV}/main.tf"
-              if [ ! -f "$FILE_PATH" ]; then
-                echo "❌ File also not found: $FILE_PATH"
-                continue
-              fi
+              echo "Available files in projects/${MODULE_NAME}:"
+              find projects/${MODULE_NAME} -name "*.tf" 2>/dev/null || echo "No terraform files found"
+              continue
             fi
 
             echo "📝 Updating $FILE_PATH with version $NEW_VERSION"
@@ -395,7 +389,7 @@ jobs:
             git add $FILE_PATH
 
             # Collect info for commit message and PR body
-            echo "${APP_KEY}:${NEW_VERSION}:${NEW_TAG}" >> /tmp/updated_modules.txt
+            echo "${MODULE_KEY}:${NEW_VERSION}:${NEW_TAG}" >> /tmp/updated_modules.txt
             echo "- $FILE_PATH" >> /tmp/updated_files.txt
           done
 
@@ -447,8 +441,8 @@ jobs:
             # Add each module to PR body
             while IFS= read -r line; do
               if [ ! -z "$line" ]; then
-                IFS=':' read -r app_key version tag <<< "$line"
-                echo "- **${app_key}**: \`${version}\` (tag: \`${tag}\`)" >> pr_body_multi.md
+                IFS=':' read -r module_key version tag <<< "$line"
+                echo "- **${module_key}**: \`${version}\` (tag: \`${tag}\`)" >> pr_body_multi.md
               fi
             done <<< "$UPDATED_MODULES"
 
@@ -527,15 +521,15 @@ jobs:
             // Build module summary
             let moduleSummary = '';
             changedModules.forEach(module => {
-              const tag = tagMap[module.appKey] || 'N/A';
-              const version = versionMap[module.appKey] || 'N/A';
-              moduleSummary += `- **${module.appKey}** (\`${module.modulePath}\`): \`${version}\`\n`;
+              const tag = tagMap[module.moduleKey] || 'N/A';
+              const version = versionMap[module.moduleKey] || 'N/A';
+              moduleSummary += `- **${module.moduleKey}** (\`${module.modulePath}\`): \`${version}\`\n`;
             });
 
             // Build tags list
             let tagsList = '';
             changedModules.forEach(module => {
-              const tag = tagMap[module.appKey] || 'N/A';
+              const tag = tagMap[module.moduleKey] || 'N/A';
               tagsList += `- \`${tag}\`\n`;
             });
 
