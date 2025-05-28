@@ -31,7 +31,7 @@ jobs:
         with:
           app-id: ${{ secrets.TF_AUTOMATION_APP_ID }}
           private-key: ${{ secrets.TF_AUTOMATION_APP_SECRET }}
-        repositories: terraform-control
+          repositories: terraform-control
 
       - name: Get PR details
         id: pr-details
