@@ -111,43 +111,54 @@ jobs:
           set -e
 
           APP_NAME=${{ steps.pr-details.outputs.app_name }}
+          BRANCH_NAME=${{ steps.pr-details.outputs.head_branch }}
           SHA=${{ steps.pr-details.outputs.head_sha }}
           AUTHOR=${{ steps.pr-details.outputs.pr_author }}
-          TAG_PREFIX="0.0.0-terraform"
 
           echo "🔧 App: $APP_NAME"
+          echo "🔧 Branch: $BRANCH_NAME"
           echo "🔧 Commit SHA: $SHA"
 
           # Fetch tags from remote
           git fetch --tags origin
 
-          # Get latest RC tag for this app (sorted by version)
-          LATEST_TAG=$(git tag --list "${TAG_PREFIX}-${APP_NAME}-rc*" | sort -V | tail -n 1)
+          # New tag format: rc/terraform/hcp-terraform/0.0.0-${branch}-${incrementor}
+          TAG_PREFIX="rc/terraform/${APP_NAME}"
+          VERSION_PREFIX="0.0.0-${BRANCH_NAME}"
+
+          # Get latest RC tag for this app and branch (sorted by version)
+          LATEST_TAG=$(git tag --list "${TAG_PREFIX}/${VERSION_PREFIX}-*" | sort -V | tail -n 1)
           echo "🔍 Latest tag: ${LATEST_TAG:-none}"
 
           if [[ -z "$LATEST_TAG" ]]; then
             NEW_RC_NUM=1
           else
-            RC_NUM=$(echo $LATEST_TAG | sed -E 's/.*-rc([0-9]+)$/\1/')
+            # Extract the incrementor number from the tag
+            RC_NUM=$(echo $LATEST_TAG | sed -E "s|.*${VERSION_PREFIX}-([0-9]+)$|\1|")
             NEW_RC_NUM=$((RC_NUM + 1))
           fi
 
-          NEW_TAG="${TAG_PREFIX}-${APP_NAME}-${AUTHOR}-rc${NEW_RC_NUM}"
+          # Create the new tag and version
+          NEW_VERSION="${VERSION_PREFIX}-${NEW_RC_NUM}"
+          NEW_TAG="${TAG_PREFIX}/${NEW_VERSION}"
 
           # Check if tag already exists (local or remote)
           while git rev-parse "$NEW_TAG" >/dev/null 2>&1; do
             echo "Tag $NEW_TAG already exists, incrementing RC number"
             NEW_RC_NUM=$((NEW_RC_NUM + 1))
-            NEW_TAG="${TAG_PREFIX}-${APP_NAME}-${AUTHOR}-rc${NEW_RC_NUM}"
+            NEW_VERSION="${VERSION_PREFIX}-${NEW_RC_NUM}"
+            NEW_TAG="${TAG_PREFIX}/${NEW_VERSION}"
           done
 
           echo "🏷️ New tag: $NEW_TAG"
+          echo "📦 New version: $NEW_VERSION"
 
           # Create and push the tag
           git tag $NEW_TAG $SHA
           git push origin $NEW_TAG
 
           echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
       # STEP 3: Publish terraform module
       - name: Publish terraform module
@@ -157,8 +168,10 @@ jobs:
 
           APP_NAME="${{ steps.pr-details.outputs.app_name }}"
           NEW_TAG="${{ steps.create-tag.outputs.new_tag }}"
+          NEW_VERSION="${{ steps.create-tag.outputs.new_version }}"
 
           echo "📦 Publishing module: $APP_NAME with tag: $NEW_TAG"
+          echo "📦 Version for control repo: $NEW_VERSION"
 
           # Add your actual publishing logic here
           # This could be:
@@ -181,10 +194,12 @@ jobs:
 
           APP_NAME=${{ steps.pr-details.outputs.app_name }}
           NEW_TAG=${{ steps.create-tag.outputs.new_tag }}
+          NEW_VERSION=${{ steps.create-tag.outputs.new_version }}
           AUTHOR=${{ steps.pr-details.outputs.pr_author }}
           PR_NUMBER=${{ steps.pr-details.outputs.pr_number }}
           ENV=${{ steps.pr-details.outputs.environment }}
-          BRANCH_NAME="auto-update-${APP_NAME}-${AUTHOR}-${PR_NUMBER}"
+          BRANCH_NAME=${{ steps.pr-details.outputs.head_branch }}
+          UPDATE_BRANCH_NAME="auto-update-${APP_NAME}-${BRANCH_NAME}-${PR_NUMBER}"
 
           CONTROL_REPO="shabbir-saifee-cmm/terraform-control"
           CONTROL_CLONE="terraform-control"
@@ -196,11 +211,11 @@ jobs:
           git config user.email "github-actions@github.com"
 
           # Check if remote branch exists, else create from main
-          if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
-            git checkout $BRANCH_NAME
-            git pull origin $BRANCH_NAME
+          if git ls-remote --heads origin $UPDATE_BRANCH_NAME | grep $UPDATE_BRANCH_NAME; then
+            git checkout $UPDATE_BRANCH_NAME
+            git pull origin $UPDATE_BRANCH_NAME
           else
-            git checkout -b $BRANCH_NAME origin/main
+            git checkout -b $UPDATE_BRANCH_NAME origin/main
           fi
 
           # Update file
@@ -213,64 +228,72 @@ jobs:
             exit 1
           fi
 
-          echo "📝 Updating $FILE_PATH with version $NEW_TAG"
+          echo "📝 Updating $FILE_PATH with version $NEW_VERSION"
 
-          # Update version
-          sed -i -E "0,/^(\s*version)(\s*=\s*)\"[^\"]+\"/s//\1\2\"${NEW_TAG}\"/" $FILE_PATH
+          # Update version with the version format (not the full tag)
+          sed -i -E "0,/^(\s*version)(\s*=\s*)\"[^\"]+\"/s//\1\2\"${NEW_VERSION}\"/" $FILE_PATH
 
           git add $FILE_PATH
 
-          git commit -m "Update ${APP_NAME} module to ${NEW_TAG}
+          git commit -m "Update ${APP_NAME} module to ${NEW_VERSION}
+
+          Branch: ${BRANCH_NAME}
+          Tag: ${NEW_TAG}
           Co-authored-by: ${AUTHOR} <${AUTHOR}@users.noreply.github.com>" || echo "No changes to commit"
 
           # Push branch
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${CONTROL_REPO}.git
-          git push --force-with-lease origin $BRANCH_NAME
+          git push --force-with-lease origin $UPDATE_BRANCH_NAME
 
           # Check if PR exists
-          EXISTING_PR=$(gh pr list --repo $CONTROL_REPO --head $BRANCH_NAME --json number --jq '.[0].number')
+          EXISTING_PR=$(gh pr list --repo $CONTROL_REPO --head $UPDATE_BRANCH_NAME --json number --jq '.[0].number')
 
           if [ -z "$EXISTING_PR" ]; then
-            gh pr create --title "Update ${APP_NAME} module to ${NEW_TAG} by @${AUTHOR}" \
-              --body "This PR updates the \`${APP_NAME}\` module to use tag \`${NEW_TAG}\` in \`${ENV}\`.
+            gh pr create --title "Update ${APP_NAME} module to ${NEW_VERSION} (${BRANCH_NAME}) by @${AUTHOR}" \
+              --body "This PR updates the \`${APP_NAME}\` module to use version \`${NEW_VERSION}\` in \`${ENV}\`.
+
               ## 📋 Details
               - **Module**: \`${APP_NAME}\`
               - **Environment**: \`${ENV}\`
-              - **New Version**: \`${NEW_TAG}\`
+              - **New Version**: \`${NEW_VERSION}\`
+              - **Source Branch**: \`${BRANCH_NAME}\`
+              - **Full Tag**: \`${NEW_TAG}\`
               - **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})
               - **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})
 
               ---
               *This PR was automatically created by the terraform automation system.*" \
-                            --base main --head $BRANCH_NAME \
-                            --assignee $AUTHOR \
-                            --reviewer $AUTHOR
+              --base main --head $UPDATE_BRANCH_NAME \
+              --assignee $AUTHOR \
+              --reviewer $AUTHOR
 
-                          echo "✅ Created new PR for ${APP_NAME} update"
-                        else
-                          echo "✅ Updated existing PR #$EXISTING_PR for ${APP_NAME}"
-                        fi
+            echo "✅ Created new PR for ${APP_NAME} update"
+          else
+            echo "✅ Updated existing PR #$EXISTING_PR for ${APP_NAME}"
+          fi
 
-                        PR_URL=$(gh pr list --repo $CONTROL_REPO --head $BRANCH_NAME --json url --jq '.[0].url')
+          PR_URL=$(gh pr list --repo $CONTROL_REPO --head $UPDATE_BRANCH_NAME --json url --jq '.[0].url')
 
-                        if [ -z "$PR_URL" ]; then
-                          COMMIT_SHA=$(git rev-parse HEAD)
-                          PR_URL="https://github.com/${CONTROL_REPO}/commit/${COMMIT_SHA}"
-                          MSG="🔄 Updated \`${APP_NAME}\` in [terraform-control](${PR_URL}) (commit only, no PR)."
-                        else
-                          MSG="📦 Opened/updated terraform-control PR for \`${APP_NAME}\`: ${PR_URL}"
-                        fi
+          if [ -z "$PR_URL" ]; then
+            COMMIT_SHA=$(git rev-parse HEAD)
+            PR_URL="https://github.com/${CONTROL_REPO}/commit/${COMMIT_SHA}"
+            MSG="🔄 Updated \`${APP_NAME}\` in [terraform-control](${PR_URL}) (commit only, no PR)."
+          else
+            MSG="📦 Opened/updated terraform-control PR for \`${APP_NAME}\`: ${PR_URL}"
+          fi
 
-                        echo "control_message=$MSG" >> $GITHUB_OUTPUT
+          echo "control_message=$MSG" >> $GITHUB_OUTPUT
 
-                    # STEP 5: Final status comment
+      # STEP 5: Final status comment
       - name: Comment on PR with final status
         uses: actions/github-script@v6
         with:
           script: |
             const newTag = '${{ steps.create-tag.outputs.new_tag }}';
+            const newVersion = '${{ steps.create-tag.outputs.new_version }}';
             const appName = '${{ steps.pr-details.outputs.app_name }}';
             const environment = '${{ steps.pr-details.outputs.environment }}';
+            const branchName = '${{ steps.pr-details.outputs.head_branch }}';
             const controlMessage = '${{ steps.update-control.outputs.control_message }}';
             const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
@@ -283,7 +306,9 @@ jobs:
               ## 📋 Summary
               - **App**: \`${appName}\`
               - **Environment**: \`${environment}\`
+              - **Source Branch**: \`${branchName}\`
               - **RC Tag**: \`${newTag}\`
+              - **Version**: \`${newVersion}\`
 
               ## ✅ Pipeline Steps
               1. ✅ **Tag Created**: \`${newTag}\`
@@ -293,8 +318,7 @@ jobs:
               Your changes are ready for deployment in \`${environment}\` environment!
 
               [View Workflow Run](${workflowUrl})`
-                          });
-
+            });
 
 # app id 1333967
 # install id 68705337
