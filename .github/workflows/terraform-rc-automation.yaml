@@ -253,19 +253,19 @@ jobs:
               --body "This PR updates the \`${APP_NAME}\` module to use version \`${NEW_VERSION}\` in \`${ENV}\`.
 
             ## 📋 Details
-              - **Module**: \`${APP_NAME}\`
-              - **Environment**: \`${ENV}\`
-              - **New Version**: \`${NEW_VERSION}\`
-              - **Source Branch**: \`${BRANCH_NAME}\`
-              - **Full Tag**: \`${NEW_TAG}\`
-              - **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})
-              - **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})
+            - **Module**: \`${APP_NAME}\`
+            - **Environment**: \`${ENV}\`
+            - **New Version**: \`${NEW_VERSION}\`
+            - **Source Branch**: \`${BRANCH_NAME}\`
+            - **Full Tag**: \`${NEW_TAG}\`
+            - **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})
+            - **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})
 
-              ---
-              *This PR was automatically created by the terraform automation system.*" \
-              --base main --head $UPDATE_BRANCH_NAME \
-              --assignee $AUTHOR \
-              --reviewer $AUTHOR
+            ---
+            *This PR was automatically created by the terraform automation system.*" \
+            --base main --head $UPDATE_BRANCH_NAME \
+            --assignee $AUTHOR \
+            --reviewer $AUTHOR
 
             echo "✅ Created new PR for ${APP_NAME} update"
           else
