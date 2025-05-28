@@ -3,8 +3,11 @@ name: Full Terraform RC Pipeline
 on:
   workflow_call:
     secrets:
-      TF_AUTOMATION_GITHUB_TOKEN:
-        description: 'Token for terraform-control repo access'
+      TF_AUTOMATION_APP_ID:
+        description: 'github app id for terraform-control repo access'
+        required: true
+      TF_AUTOMATION_APP_SECRET:
+        description: 'github app secret for terraform-control repo access'
         required: true
       # MCK_CMM_HCP_TERRAFORM_TOKEN:
       #   description: 'Terraform API Token'
@@ -21,6 +24,13 @@ jobs:
       # STEP 1: Validate comment and get PR details
       - name: Checkout terraform repo
         uses: actions/checkout@v3
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.TF_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.TF_AUTOMATION_APP_SECRET }}
 
       - name: Get PR details
         id: pr-details
@@ -164,7 +174,7 @@ jobs:
       - name: Update version in terraform-control and open PR
         id: update-control
         env:
-          GH_TOKEN: ${{ secrets.TF_AUTOMATION_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -e
 
@@ -283,3 +293,7 @@ jobs:
 
               [View Workflow Run](${workflowUrl})`
                           });
+
+
+# app id 1333967
+# install id 68705337
