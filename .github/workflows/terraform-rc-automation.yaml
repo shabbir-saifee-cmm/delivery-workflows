@@ -439,36 +439,31 @@ jobs:
           EXISTING_PR=$(gh pr list --repo $CONTROL_REPO --head $UPDATE_BRANCH_NAME --json number --jq '.[0].number')
 
           if [ -z "$EXISTING_PR" ]; then
-            # Create PR body with all modules
-            cat > pr_body_multi.md << EOF
-            This PR updates ${MODULE_COUNT} module(s) to new versions in \`${ENV}\`.
-
-            ## 📋 Updated Modules
-            EOF
+            # Create PR body using echo statements instead of here-documents
+            echo "This PR updates ${MODULE_COUNT} module(s) to new versions in \`${ENV}\`." > pr_body_multi.md
+            echo "" >> pr_body_multi.md
+            echo "## 📋 Updated Modules" >> pr_body_multi.md
 
             # Add each module to PR body
             while IFS= read -r line; do
               if [ ! -z "$line" ]; then
                 IFS=':' read -r app_key version tag <<< "$line"
-                cat >> pr_body_multi.md << EOF
-                - **${app_key}**: \`${version}\` (tag: \`${tag}\`)
-                EOF
+                echo "- **${app_key}**: \`${version}\` (tag: \`${tag}\`)" >> pr_body_multi.md
               fi
             done <<< "$UPDATED_MODULES"
 
-            cat >> pr_body_multi.md << EOF
-            ## 📂 Updated Files
-            ${UPDATED_FILES}
-
-            ## 🔗 Source Information
-            - **Environment**: \`${ENV}\`
-            - **Source Branch**: \`${BRANCH_NAME}\`
-            - **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})
-            - **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})
-
-            ---
-            *This PR was automatically created by the terraform automation system.*
-            EOF
+            echo "" >> pr_body_multi.md
+            echo "## 📂 Updated Files" >> pr_body_multi.md
+            echo "${UPDATED_FILES}" >> pr_body_multi.md
+            echo "" >> pr_body_multi.md
+            echo "## 🔗 Source Information" >> pr_body_multi.md
+            echo "- **Environment**: \`${ENV}\`" >> pr_body_multi.md
+            echo "- **Source Branch**: \`${BRANCH_NAME}\`" >> pr_body_multi.md
+            echo "- **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})" >> pr_body_multi.md
+            echo "- **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})" >> pr_body_multi.md
+            echo "" >> pr_body_multi.md
+            echo "---" >> pr_body_multi.md
+            echo "*This PR was automatically created by the terraform automation system.*" >> pr_body_multi.md
 
             # Create title based on module count
             if [ "$MODULE_COUNT" -eq 1 ]; then
