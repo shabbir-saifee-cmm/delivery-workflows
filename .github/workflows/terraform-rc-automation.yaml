@@ -250,7 +250,7 @@ jobs:
 
           if [ -z "$EXISTING_PR" ]; then
             gh pr create --title "Update ${APP_NAME} module to ${NEW_VERSION} (${BRANCH_NAME}) by @${AUTHOR}" \
-              --body "This PR updates the \`${APP_NAME}\` module to use version \`${NEW_VERSION}\` in \`${ENV}\`.
+              --body "This PR updates the \`${APP_NAME}\` module to use version \`${NEW_VERSION}\` in \`${ENV}\`.\n
 
               ## 📋 Details
               - **Module**: \`${APP_NAME}\`
