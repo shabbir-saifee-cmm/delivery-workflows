@@ -453,23 +453,22 @@ jobs:
                 cat >> pr_body_multi.md << EOF
                 - **${app_key}**: \`${version}\` (tag: \`${tag}\`)
                 EOF
-                              fi
-                            done <<< "$UPDATED_MODULES"
+              fi
+            done <<< "$UPDATED_MODULES"
 
-                            cat >> pr_body_multi.md << EOF
+            cat >> pr_body_multi.md << EOF
+            ## 📂 Updated Files
+            ${UPDATED_FILES}
 
-                ## 📂 Updated Files
-                ${UPDATED_FILES}
+            ## 🔗 Source Information
+            - **Environment**: \`${ENV}\`
+            - **Source Branch**: \`${BRANCH_NAME}\`
+            - **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})
+            - **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})
 
-                ## 🔗 Source Information
-                - **Environment**: \`${ENV}\`
-                - **Source Branch**: \`${BRANCH_NAME}\`
-                - **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})
-                - **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})
-
-                ---
-                *This PR was automatically created by the terraform automation system.*
-                EOF
+            ---
+            *This PR was automatically created by the terraform automation system.*
+            EOF
 
             # Create title based on module count
             if [ "$MODULE_COUNT" -eq 1 ]; then
