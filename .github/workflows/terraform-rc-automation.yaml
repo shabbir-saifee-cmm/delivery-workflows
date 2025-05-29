@@ -145,45 +145,44 @@ jobs:
                 .join(', ');
               core.setFailed(`No app changes detected in configured terraform modules. Configured paths: ${configuredPaths}`);
               return;
+            } else if (appNameList.length > 1) {
+              core.setFailed(`Multiple modules changed: ${appNameList.join(', ')}. Only one module change is allowed per PR.`);
+              return;
             }
 
-            console.log(`Found ${appNameList.length} changed module(s): ${appNameList.join(', ')}`);
-
-            // Store all changed apps and their configurations
-            const changedModules = appNameList.map(moduleKey => {
-              const moduleConfig = artifactConfig.terraform[moduleKey];
-              return {
-                moduleKey: moduleKey,
-                moduleName: moduleConfig.moduleName || moduleKey,
-                modulePath: moduleConfig.modulePath
-              };
-            });
-
+            const moduleKey = appNameList[0];
+            const moduleConfig = artifactConfig.terraform[moduleKey];
+            const moduleName = moduleConfig.moduleName || moduleKey;
+            const modulePath = moduleConfig.modulePath;
             const prAuthor = pr.user.login;
 
             core.setOutput("head_branch", pr.head.ref);
             core.setOutput("head_sha", pr.head.sha);
             core.setOutput("pr_number", prNumber);
+            core.setOutput("module_key", moduleKey);
+            core.setOutput("module_name", moduleName);
+            core.setOutput("module_path", modulePath);
             core.setOutput("environment", environment);
             core.setOutput("pr_author", prAuthor);
-            core.setOutput("changed_modules", JSON.stringify(changedModules));
 
-            core.info(`✅ Changed modules: ${changedModules.map(m => `${m.moduleKey} (${m.modulePath})`).join(', ')}, Env: ${environment}`);
+            core.info(`✅ Module Key: ${moduleKey}, Module Name: ${moduleName}, Module Path: ${modulePath}, Env: ${environment}`);
 
-      # STEP 2: Create RC tags for all changed modules
-      - name: Create RC tags for changed modules
-        id: create-tags
+      # STEP 2: Create RC tag for the changed module
+      - name: Create new RC tag for module
+        id: create-tag
         run: |
           set -e
 
+          MODULE_KEY=${{ steps.pr-details.outputs.module_key }}
+          MODULE_NAME=${{ steps.pr-details.outputs.module_name }}
           BRANCH_NAME=${{ steps.pr-details.outputs.head_branch }}
           SHA=${{ steps.pr-details.outputs.head_sha }}
           AUTHOR=${{ steps.pr-details.outputs.pr_author }}
-          CHANGED_MODULES='${{ steps.pr-details.outputs.changed_modules }}'
 
+          echo "🔧 Module Key: $MODULE_KEY"
+          echo "🔧 Module Name: $MODULE_NAME"
           echo "🔧 Branch: $BRANCH_NAME"
           echo "🔧 Commit SHA: $SHA"
-          echo "🔧 Changed modules: $CHANGED_MODULES"
 
           # Clean branch name (remove special characters, convert to lowercase)
           CLEAN_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]')
@@ -192,111 +191,73 @@ jobs:
           # Fetch tags from remote
           git fetch --tags origin
 
-          # Parse JSON and create tags for each module
-          CREATED_TAGS=""
-          CREATED_VERSIONS=""
+          # Tag format: rc/terraform/${moduleKey}/0.0.0-${branch}-${incrementor}
+          TAG_PREFIX="rc/terraform/${MODULE_KEY}"
+          VERSION_PREFIX="0.0.0-${CLEAN_BRANCH}"
 
-          echo "$CHANGED_MODULES" | jq -r '.[] | @base64' | while read -r module_data; do
-            module=$(echo "$module_data" | base64 -d)
-            MODULE_KEY=$(echo "$module" | jq -r '.moduleKey')
-            MODULE_NAME=$(echo "$module" | jq -r '.moduleName')
-            MODULE_PATH=$(echo "$module" | jq -r '.modulePath')
+          # Get latest RC tag for this module key and branch
+          LATEST_TAG=$(git tag --list "${TAG_PREFIX}/${VERSION_PREFIX}-*" | sort -V | tail -n 1)
+          echo "🔍 Latest tag for ${MODULE_KEY}: ${LATEST_TAG:-none}"
 
-            echo "🏷️ Processing module: $MODULE_KEY"
-            echo "   - Name: $MODULE_NAME"
-            echo "   - Path: $MODULE_PATH"
-
-            # Use module key (not module name) for tag - this is the config key
-            TAG_PREFIX="rc/terraform/${MODULE_KEY}"
-            VERSION_PREFIX="0.0.0-${CLEAN_BRANCH}"
-
-            # Get latest RC tag for this module key and branch
-            LATEST_TAG=$(git tag --list "${TAG_PREFIX}/${VERSION_PREFIX}-*" | sort -V | tail -n 1)
-            echo "🔍 Latest tag for ${MODULE_KEY}: ${LATEST_TAG:-none}"
-
-            if [[ -z "$LATEST_TAG" ]]; then
+          if [[ -z "$LATEST_TAG" ]]; then
+            NEW_RC_NUM=1
+          else
+            # Extract the incrementor number from the tag
+            RC_NUM=$(echo $LATEST_TAG | sed -E "s|.*${VERSION_PREFIX//./\\.}-([0-9]+)$|\1|")
+            if [[ -z "$RC_NUM" || ! "$RC_NUM" =~ ^[0-9]+$ ]]; then
+              echo "⚠️ Could not extract RC number from $LATEST_TAG, starting from 1"
               NEW_RC_NUM=1
             else
-              # Extract the incrementor number from the tag
-              RC_NUM=$(echo $LATEST_TAG | sed -E "s|.*${VERSION_PREFIX//./\\.}-([0-9]+)$|\1|")
-              if [[ -z "$RC_NUM" || ! "$RC_NUM" =~ ^[0-9]+$ ]]; then
-                echo "⚠️ Could not extract RC number from $LATEST_TAG, starting from 1"
-                NEW_RC_NUM=1
-              else
-                NEW_RC_NUM=$((RC_NUM + 1))
-              fi
+              NEW_RC_NUM=$((RC_NUM + 1))
             fi
-
-            # Create the new tag and version
-            NEW_VERSION="${VERSION_PREFIX}-${NEW_RC_NUM}"
-            NEW_TAG="${TAG_PREFIX}/${NEW_VERSION}"
-
-            # Check if tag already exists (local or remote)
-            while git rev-parse "$NEW_TAG" >/dev/null 2>&1; do
-              echo "Tag $NEW_TAG already exists, incrementing RC number"
-              NEW_RC_NUM=$((NEW_RC_NUM + 1))
-              NEW_VERSION="${VERSION_PREFIX}-${NEW_RC_NUM}"
-              NEW_TAG="${TAG_PREFIX}/${NEW_VERSION}"
-            done
-
-            echo "🏷️ Creating tag: $NEW_TAG"
-            echo "📦 Version: $NEW_VERSION"
-
-            # Create and push the tag
-            git tag $NEW_TAG $SHA
-            git push origin $NEW_TAG
-
-            # Collect results (append to files since we're in a subshell)
-            echo "${MODULE_KEY}:${NEW_TAG}" >> /tmp/created_tags.txt
-            echo "${MODULE_KEY}:${NEW_VERSION}" >> /tmp/created_versions.txt
-          done
-
-          # Read results from files
-          if [ -f /tmp/created_tags.txt ]; then
-            CREATED_TAGS=$(cat /tmp/created_tags.txt | tr '\n' ',' | sed 's/,$//')
-            CREATED_VERSIONS=$(cat /tmp/created_versions.txt | tr '\n' ',' | sed 's/,$//')
-            rm /tmp/created_tags.txt /tmp/created_versions.txt
           fi
 
-          echo "created_tags=$CREATED_TAGS" >> $GITHUB_OUTPUT
-          echo "created_versions=$CREATED_VERSIONS" >> $GITHUB_OUTPUT
+          # Create the new tag and version
+          NEW_VERSION="${VERSION_PREFIX}-${NEW_RC_NUM}"
+          NEW_TAG="${TAG_PREFIX}/${NEW_VERSION}"
 
-          echo "✅ Created tags: $CREATED_TAGS"
-          echo "✅ Created versions: $CREATED_VERSIONS"
+          # Check if tag already exists (local or remote)
+          while git rev-parse "$NEW_TAG" >/dev/null 2>&1; do
+            echo "Tag $NEW_TAG already exists, incrementing RC number"
+            NEW_RC_NUM=$((NEW_RC_NUM + 1))
+            NEW_VERSION="${VERSION_PREFIX}-${NEW_RC_NUM}"
+            NEW_TAG="${TAG_PREFIX}/${NEW_VERSION}"
+          done
 
-      # STEP 3: Publish terraform modules
-      - name: Publish terraform modules
+          echo "🏷️ New tag: $NEW_TAG"
+          echo "📦 New version: $NEW_VERSION"
+
+          # Create and push the tag
+          git tag $NEW_TAG $SHA
+          git push origin $NEW_TAG
+
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      # STEP 3: Publish terraform module
+      - name: Publish terraform module
         id: publish
         run: |
           set -e
 
-          CHANGED_MODULES='${{ steps.pr-details.outputs.changed_modules }}'
-          CREATED_TAGS="${{ steps.create-tags.outputs.created_tags }}"
-          CREATED_VERSIONS="${{ steps.create-tags.outputs.created_versions }}"
+          MODULE_KEY="${{ steps.pr-details.outputs.module_key }}"
+          MODULE_NAME="${{ steps.pr-details.outputs.module_name }}"
+          NEW_TAG="${{ steps.create-tag.outputs.new_tag }}"
+          NEW_VERSION="${{ steps.create-tag.outputs.new_version }}"
 
-          echo "📦 Publishing modules..."
-          echo "📦 Created tags: $CREATED_TAGS"
-          echo "📦 Created versions: $CREATED_VERSIONS"
+          echo "📦 Publishing module: $MODULE_KEY ($MODULE_NAME)"
+          echo "📦 Tag: $NEW_TAG"
+          echo "📦 Version for control repo: $NEW_VERSION"
 
-          # Parse and publish each module
-          echo "$CHANGED_MODULES" | jq -r '.[] | @base64' | while read -r module_data; do
-            module=$(echo "$module_data" | base64 -d)
-            MODULE_KEY=$(echo "$module" | jq -r '.moduleKey')
-            MODULE_NAME=$(echo "$module" | jq -r '.moduleName')
+          # Add your actual publishing logic here
+          # This could be:
+          # - Publishing to Terraform Cloud/Enterprise
+          # - Publishing to a private registry
+          # - Building and uploading artifacts
 
-            echo "📦 Publishing module: $MODULE_KEY ($MODULE_NAME)"
-
-            # Add your actual publishing logic here for each module
-            # This could be:
-            # - Publishing to Terraform Cloud/Enterprise
-            # - Publishing to a private registry
-            # - Building and uploading artifacts
-
-            # Simulate publishing for now
-            sleep 1
-          done
-
-          echo "✅ All modules published successfully"
+          # Simulate publishing for now
+          sleep 2
+          echo "✅ Module published successfully"
           echo "status=success" >> $GITHUB_OUTPUT
 
       # STEP 4: Update control repo for all changed modules (single PR)
@@ -496,42 +457,15 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            const changedModules = JSON.parse('${{ steps.pr-details.outputs.changed_modules }}');
-            const createdTags = '${{ steps.create-tags.outputs.created_tags }}';
-            const createdVersions = '${{ steps.create-tags.outputs.created_versions }}';
+            const newTag = '${{ steps.create-tag.outputs.new_tag }}';
+            const newVersion = '${{ steps.create-tag.outputs.new_version }}';
+            const moduleKey = '${{ steps.pr-details.outputs.module_key }}';
+            const moduleName = '${{ steps.pr-details.outputs.module_name }}';
+            const modulePath = '${{ steps.pr-details.outputs.module_path }}';
             const environment = '${{ steps.pr-details.outputs.environment }}';
             const branchName = '${{ steps.pr-details.outputs.head_branch }}';
             const controlMessage = '${{ steps.update-control.outputs.control_message }}';
             const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-
-            // Parse tags and versions
-            const tagMap = {};
-            const versionMap = {};
-
-            createdTags.split(',').forEach(pair => {
-              const [key, value] = pair.split(':');
-              tagMap[key] = value;
-            });
-
-            createdVersions.split(',').forEach(pair => {
-              const [key, value] = pair.split(':');
-              versionMap[key] = value;
-            });
-
-            // Build module summary
-            let moduleSummary = '';
-            changedModules.forEach(module => {
-              const tag = tagMap[module.moduleKey] || 'N/A';
-              const version = versionMap[module.moduleKey] || 'N/A';
-              moduleSummary += `- **${module.moduleKey}** (\`${module.modulePath}\`): \`${version}\`\n`;
-            });
-
-            // Build tags list
-            let tagsList = '';
-            changedModules.forEach(module => {
-              const tag = tagMap[module.moduleKey] || 'N/A';
-              tagsList += `- \`${tag}\`\n`;
-            });
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -540,22 +474,20 @@ jobs:
               body: `🎉 **Terraform RC Pipeline Complete!**
 
               ## 📋 Summary
+              - **Module Key**: \`${moduleKey}\`
+              - **Module Name**: \`${moduleName}\`
+              - **Module Path**: \`${modulePath}\`
               - **Environment**: \`${environment}\`
               - **Source Branch**: \`${branchName}\`
-              - **Modules Processed**: ${changedModules.length}
-
-              ## 📦 Updated Modules
-              ${moduleSummary}
-
-              ## 🏷️ Created Tags
-              ${tagsList}
+              - **RC Tag**: \`${newTag}\`
+              - **Version**: \`${newVersion}\`
 
               ## ✅ Pipeline Steps
-              1. ✅ **Tags Created**: ${changedModules.length} RC tag(s) created
-              2. ✅ **Modules Published**: All modules published to Terraform registry
+              1. ✅ **Tag Created**: \`${newTag}\`
+              2. ✅ **Module Published**: Successfully published to Terraform registry
               3. ✅ **Control Repo Updated**: ${controlMessage}
 
-              All module changes are consolidated in a single control repo PR for easier review and deployment!
+              Your changes are ready for deployment in \`${environment}\` environment!
 
               [View Workflow Run](${workflowUrl})`
             });
