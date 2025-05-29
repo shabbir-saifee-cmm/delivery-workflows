@@ -426,61 +426,15 @@ jobs:
               return;
             }
 
-            // Determine which step failed based on available outputs
-            let failureStep = 'Unknown';
-            let failureDetails = '';
-
-            const prDetailsOutput = '${{ steps.pr-details.outputs.module_key }}';
-            const createTagOutput = '${{ steps.create-tag.outputs.new_tag }}';
-            const publishOutput = '${{ steps.publish.outputs.status }}';
-            const updateControlOutput = '${{ steps.update-control.outputs.control_message }}';
-
-            if (!prDetailsOutput) {
-              failureStep = 'PR Analysis';
-              failureDetails = 'Failed to analyze PR details or validate terraform module changes.';
-            } else if (!createTagOutput) {
-              failureStep = 'Tag Creation';
-              failureDetails = 'Failed to create or push the RC tag.';
-            } else if (!publishOutput) {
-              failureStep = 'Module Publishing';
-              failureDetails = 'Failed to publish the terraform module.';
-            } else if (!updateControlOutput) {
-              failureStep = 'Control Repo Update';
-              failureDetails = 'Failed to update the terraform-control repository.';
-            } else {
-              failureStep = 'Unknown';
-              failureDetails = 'The workflow failed at an unexpected step.';
-            }
-
-            const moduleKey = '${{ steps.pr-details.outputs.module_key }}' || 'Unknown';
-            const environment = '${{ steps.pr-details.outputs.environment }}' || 'Unknown';
-            const branchName = '${{ steps.pr-details.outputs.head_branch }}' || context.payload.issue?.pull_request?.head?.ref || 'Unknown';
-
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
               body: `❌ **Terraform RC Pipeline Failed**
 
-              ## 🚨 Failure Details
-              - **Failed Step**: ${failureStep}
-              - **Module**: \`${moduleKey}\`
-              - **Environment**: \`${environment}\`
-              - **Branch**: \`${branchName}\`
+              The automation encountered an error and could not complete successfully.
 
-              ## 📋 What Happened
-              ${failureDetails}
-
-              ## 🔧 Next Steps
-              1. Check the [workflow logs](${workflowUrl}) for detailed error messages
-              2. Fix the underlying issue in your PR
-              3. Comment \`ready-to-test-terraform-${environment}\` again to retry
-
-              ## 💡 Common Issues
-              - **PR Analysis failures**: Multiple modules changed, invalid comment format, or no terraform changes detected
-              - **Tag Creation failures**: Git permission issues or network problems
-              - **Publishing failures**: Registry authentication or module validation issues
-              - **Control Repo failures**: Missing terraform-control files or GitHub App permission issues
+              Please check the [workflow logs](${workflowUrl}) for detailed error information, then fix any issues and retry your comment.
 
               [View Full Workflow Run](${workflowUrl})`
             });
