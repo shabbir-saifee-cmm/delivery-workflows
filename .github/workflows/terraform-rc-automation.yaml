@@ -66,18 +66,18 @@ jobs:
               const yamlLines = artifactConfigYaml.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#'));
               artifactConfig = { terraform: {} };
 
-              let currentApp = null;
+              let currentModule = null;
               for (const line of yamlLines) {
                 if (line === 'terraform:') continue;
 
                 if (line.endsWith(':') && !line.includes('moduleName') && !line.includes('modulePath')) {
-                  // This is an app key
-                  currentApp = line.replace(':', '').trim();
-                  artifactConfig.terraform[currentApp] = {};
-                } else if (currentApp && line.includes('moduleName:')) {
-                  artifactConfig.terraform[currentApp].moduleName = line.split('moduleName:')[1].trim();
-                } else if (currentApp && line.includes('modulePath:')) {
-                  artifactConfig.terraform[currentApp].modulePath = line.split('modulePath:')[1].trim();
+                  // This is an module key
+                  currentModule = line.replace(':', '').trim();
+                  artifactConfig.terraform[currentModule] = {};
+                } else if (currentModule && line.includes('moduleName:')) {
+                  artifactConfig.terraform[currentModule].moduleName = line.split('moduleName:')[1].trim();
+                } else if (currentModule && line.includes('modulePath:')) {
+                  artifactConfig.terraform[currentModule].modulePath = line.split('modulePath:')[1].trim();
                 }
               }
             } catch (error) {
@@ -115,42 +115,42 @@ jobs:
             );
 
             // Check for changes in configured terraform modules
-            const changedApps = new Set();
+            const changedModules = new Set();
 
-            for (const [appKey, appConfig] of Object.entries(artifactConfig.terraform)) {
-              const modulePath = appConfig.modulePath;
+            for (const [moduleKey, moduleConfig] of Object.entries(artifactConfig.terraform)) {
+              const modulePath = moduleConfig.modulePath;
               if (!modulePath) {
-                console.log(`Warning: No modulePath configured for app ${appKey}`);
+                console.log(`Warning: No modulePath configured for terraform module ${moduleKey}`);
                 continue;
               }
 
               // Remove leading ./ if present and ensure trailing slash
               const normalizedPath = modulePath.replace(/^\.\//, '').replace(/\/$/, '') + '/';
-              console.log(`Checking for changes in ${normalizedPath} for app ${appKey}`);
+              console.log(`Checking for changes in ${normalizedPath} for terraform module ${moduleKey}`);
 
               for (const file of files) {
                 if (file.filename.startsWith(normalizedPath)) {
-                  console.log(`Found change in ${file.filename} for app ${appKey}`);
-                  changedApps.add(appKey);
+                  console.log(`Found change in ${file.filename} for terraform module ${moduleKey}`);
+                  changedModules.add(moduleKey);
                   break;
                 }
               }
             }
 
-            const appNameList = Array.from(changedApps);
+            const moduleNameList = Array.from(changedModules);
 
-            if (appNameList.length === 0) {
+            if (moduleNameList.length === 0) {
               const configuredPaths = Object.entries(artifactConfig.terraform)
                 .map(([key, config]) => `${key}: ${config.modulePath}`)
                 .join(', ');
-              core.setFailed(`No app changes detected in configured terraform modules. Configured paths: ${configuredPaths}`);
+              core.setFailed(`No terraform module changes detected in configured terraform modules. Configured paths: ${configuredPaths}`);
               return;
-            } else if (appNameList.length > 1) {
-              core.setFailed(`Multiple modules changed: ${appNameList.join(', ')}. Only one module change is allowed per PR.`);
+            } else if (moduleNameList.length > 1) {
+              core.setFailed(`Multiple modules changed: ${moduleNameList.join(', ')}. Only one module change is allowed per PR.`);
               return;
             }
 
-            const moduleKey = appNameList[0];
+            const moduleKey = moduleNameList[0];
             const moduleConfig = artifactConfig.terraform[moduleKey];
             const moduleName = moduleConfig.moduleName || moduleKey;
             const modulePath = moduleConfig.modulePath;
@@ -374,9 +374,9 @@ jobs:
 
           while IFS= read -r line; do
             if [ ! -z "$line" ]; then
-              IFS=':' read -r app_key version tag <<< "$line"
+              IFS=':' read -r module_key version tag <<< "$line"
               COMMIT_MSG="${COMMIT_MSG}
-          - ${app_key}: ${version} (${tag})"
+          - ${module_key}: ${version} (${tag})"
             fi
           done <<< "$UPDATED_MODULES"
 
