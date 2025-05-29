@@ -260,38 +260,32 @@ jobs:
           echo "✅ Module published successfully"
           echo "status=success" >> $GITHUB_OUTPUT
 
-      # STEP 4: Update control repo for all changed modules (single PR)
-      - name: Update versions in terraform-control and open single PR
+      # STEP 4: Update control repo
+      - name: Update version in terraform-control and open PR
         id: update-control
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -e
 
-          CHANGED_MODULES='${{ steps.pr-details.outputs.changed_modules }}'
-          CREATED_TAGS="${{ steps.create-tags.outputs.created_tags }}"
-          CREATED_VERSIONS="${{ steps.create-tags.outputs.created_versions }}"
+          MODULE_KEY=${{ steps.pr-details.outputs.module_key }}
+          MODULE_NAME=${{ steps.pr-details.outputs.module_name }}
+          NEW_TAG=${{ steps.create-tag.outputs.new_tag }}
+          NEW_VERSION=${{ steps.create-tag.outputs.new_version }}
           AUTHOR=${{ steps.pr-details.outputs.pr_author }}
           PR_NUMBER=${{ steps.pr-details.outputs.pr_number }}
           ENV=${{ steps.pr-details.outputs.environment }}
           BRANCH_NAME=${{ steps.pr-details.outputs.head_branch }}
+          UPDATE_BRANCH_NAME="auto-update-${MODULE_KEY}-$(echo ${BRANCH_NAME} | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]')-${PR_NUMBER}"
 
           CONTROL_REPO="shabbir-saifee-cmm/terraform-control"
           CONTROL_CLONE="terraform-control"
 
-          # Single branch for all module updates
-          UPDATE_BRANCH_NAME="auto-update-multi-module-$(echo ${BRANCH_NAME} | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]')-${PR_NUMBER}"
-
-          # Clone control repo
           gh repo clone $CONTROL_REPO $CONTROL_CLONE
           cd $CONTROL_CLONE
 
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-
-          # Convert tags and versions to arrays for processing
-          IFS=',' read -ra TAG_PAIRS <<< "$CREATED_TAGS"
-          IFS=',' read -ra VERSION_PAIRS <<< "$CREATED_VERSIONS"
 
           # Check if remote branch exists, else create from main
           if git ls-remote --heads origin $UPDATE_BRANCH_NAME | grep $UPDATE_BRANCH_NAME; then
@@ -301,90 +295,29 @@ jobs:
             git checkout -b $UPDATE_BRANCH_NAME origin/main
           fi
 
-          UPDATED_MODULES=""
-          UPDATED_FILES=""
+          # Update file - use MODULE_NAME for directory structure
+          FILE_PATH="projects/${MODULE_NAME}/${ENV}/main.tf"
 
-          # Process each changed module in the same branch
-          echo "$CHANGED_MODULES" | jq -r '.[] | @base64' | while read -r module_data; do
-            module=$(echo "$module_data" | base64 -d)
-            MODULE_KEY=$(echo "$module" | jq -r '.moduleKey')
-            MODULE_NAME=$(echo "$module" | jq -r '.moduleName')
-            MODULE_PATH=$(echo "$module" | jq -r '.modulePath')
-
-            # Get tag and version for this module
-            NEW_TAG=""
-            NEW_VERSION=""
-            for pair in "${TAG_PAIRS[@]}"; do
-              if [[ "$pair" == "$MODULE_KEY:"* ]]; then
-                NEW_TAG="${pair#*:}"
-                break
-              fi
-            done
-            for pair in "${VERSION_PAIRS[@]}"; do
-              if [[ "$pair" == "$MODULE_KEY:"* ]]; then
-                NEW_VERSION="${pair#*:}"
-                break
-              fi
-            done
-
-            echo "🔄 Processing control repo update for: $MODULE_KEY"
-            echo "   - Module Name: $MODULE_NAME"
-            echo "   - New Tag: $NEW_TAG"
-            echo "   - New Version: $NEW_VERSION"
-
-            # Update file - use MODULE_NAME for directory structure
-            FILE_PATH="projects/${MODULE_NAME}/${ENV}/main.tf"
-
-            if [ ! -f "$FILE_PATH" ]; then
-              echo "❌ File not found: $FILE_PATH"
-              echo "Available files in projects/${MODULE_NAME}:"
-              find projects/${MODULE_NAME} -name "*.tf" 2>/dev/null || echo "No terraform files found"
-              continue
-            fi
-
-            echo "📝 Updating $FILE_PATH with version $NEW_VERSION"
-
-            # Update version with the version format (not the full tag)
-            sed -i -E "0,/^(\s*version)(\s*=\s*)\"[^\"]+\"/s//\1\2\"${NEW_VERSION}\"/" $FILE_PATH
-
-            git add $FILE_PATH
-
-            # Collect info for commit message and PR body
-            echo "${MODULE_KEY}:${NEW_VERSION}:${NEW_TAG}" >> /tmp/updated_modules.txt
-            echo "- $FILE_PATH" >> /tmp/updated_files.txt
-          done
-
-          # Read collected information
-          if [ -f /tmp/updated_modules.txt ]; then
-            UPDATED_MODULES=$(cat /tmp/updated_modules.txt)
-            UPDATED_FILES=$(cat /tmp/updated_files.txt)
-            rm /tmp/updated_modules.txt /tmp/updated_files.txt
+          if [ ! -f "$FILE_PATH" ]; then
+            echo "❌ File not found: $FILE_PATH"
+            echo "Available files in projects/${MODULE_NAME}:"
+            find projects/${MODULE_NAME} -name "*.tf" 2>/dev/null || echo "No terraform files found"
+            exit 1
           fi
 
-          # Count modules
-          MODULE_COUNT=$(echo "$UPDATED_MODULES" | wc -l)
+          echo "📝 Updating $FILE_PATH with version $NEW_VERSION"
 
-          # Create commit message with all modules
-          COMMIT_MSG="Update ${MODULE_COUNT} module(s) to new versions
+          # Update version with the version format (not the full tag)
+          sed -i -E "0,/^(\s*version)(\s*=\s*)\"[^\"]+\"/s//\1\2\"${NEW_VERSION}\"/" $FILE_PATH
 
-          Environment: ${ENV}
-          Source Branch: ${BRANCH_NAME}
+          git add $FILE_PATH
 
-          Updated modules:"
+          git commit -m "Update ${MODULE_KEY} module to ${NEW_VERSION}
 
-          while IFS= read -r line; do
-            if [ ! -z "$line" ]; then
-              IFS=':' read -r module_key version tag <<< "$line"
-              COMMIT_MSG="${COMMIT_MSG}
-          - ${module_key}: ${version} (${tag})"
-            fi
-          done <<< "$UPDATED_MODULES"
-
-          COMMIT_MSG="${COMMIT_MSG}
-
-          Co-authored-by: ${AUTHOR} <${AUTHOR}@users.noreply.github.com>"
-
-          git commit -m "$COMMIT_MSG" || echo "No changes to commit"
+          Module Name: ${MODULE_NAME}
+          Branch: ${BRANCH_NAME}
+          Tag: ${NEW_TAG}
+          Co-authored-by: ${AUTHOR} <${AUTHOR}@users.noreply.github.com>" || echo "No changes to commit"
 
           # Push branch
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${CONTROL_REPO}.git
@@ -394,50 +327,31 @@ jobs:
           EXISTING_PR=$(gh pr list --repo $CONTROL_REPO --head $UPDATE_BRANCH_NAME --json number --jq '.[0].number')
 
           if [ -z "$EXISTING_PR" ]; then
-            # Create PR body using echo statements instead of here-documents
-            echo "This PR updates ${MODULE_COUNT} module(s) to new versions in \`${ENV}\`." > pr_body_multi.md
-            echo "" >> pr_body_multi.md
-            echo "## 📋 Updated Modules" >> pr_body_multi.md
+            # Create PR body using echo statements
+            echo "This PR updates the \`${MODULE_KEY}\` module to use version \`${NEW_VERSION}\` in \`${ENV}\`." > pr_body.md
+            echo "" >> pr_body.md
+            echo "## 📋 Details" >> pr_body.md
+            echo "- **Module Key**: \`${MODULE_KEY}\`" >> pr_body.md
+            echo "- **Module Name**: \`${MODULE_NAME}\`" >> pr_body.md
+            echo "- **Environment**: \`${ENV}\`" >> pr_body.md
+            echo "- **New Version**: \`${NEW_VERSION}\`" >> pr_body.md
+            echo "- **Source Branch**: \`${BRANCH_NAME}\`" >> pr_body.md
+            echo "- **Full Tag**: \`${NEW_TAG}\`" >> pr_body.md
+            echo "- **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})" >> pr_body.md
+            echo "- **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})" >> pr_body.md
+            echo "" >> pr_body.md
+            echo "---" >> pr_body.md
+            echo "*This PR was automatically created by the terraform automation system.*" >> pr_body.md
 
-            # Add each module to PR body
-            while IFS= read -r line; do
-              if [ ! -z "$line" ]; then
-                IFS=':' read -r module_key version tag <<< "$line"
-                echo "- **${module_key}**: \`${version}\` (tag: \`${tag}\`)" >> pr_body_multi.md
-              fi
-            done <<< "$UPDATED_MODULES"
-
-            echo "" >> pr_body_multi.md
-            echo "## 📂 Updated Files" >> pr_body_multi.md
-            echo "${UPDATED_FILES}" >> pr_body_multi.md
-            echo "" >> pr_body_multi.md
-            echo "## 🔗 Source Information" >> pr_body_multi.md
-            echo "- **Environment**: \`${ENV}\`" >> pr_body_multi.md
-            echo "- **Source Branch**: \`${BRANCH_NAME}\`" >> pr_body_multi.md
-            echo "- **Triggered by**: [@${AUTHOR}](https://github.com/${AUTHOR})" >> pr_body_multi.md
-            echo "- **Source PR**: [#${PR_NUMBER}](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) in [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})" >> pr_body_multi.md
-            echo "" >> pr_body_multi.md
-            echo "---" >> pr_body_multi.md
-            echo "*This PR was automatically created by the terraform automation system.*" >> pr_body_multi.md
-
-            # Create title based on module count
-            if [ "$MODULE_COUNT" -eq 1 ]; then
-              FIRST_MODULE=$(echo "$UPDATED_MODULES" | head -n1 | cut -d':' -f1)
-              FIRST_VERSION=$(echo "$UPDATED_MODULES" | head -n1 | cut -d':' -f2)
-              PR_TITLE="Update ${FIRST_MODULE} module to ${FIRST_VERSION} (${BRANCH_NAME}) by @${AUTHOR}"
-            else
-              PR_TITLE="Update ${MODULE_COUNT} modules (${BRANCH_NAME}) by @${AUTHOR}"
-            fi
-
-            gh pr create --title "$PR_TITLE" \
-              --body-file pr_body_multi.md \
+            gh pr create --title "Update ${MODULE_KEY} module to ${NEW_VERSION} (${BRANCH_NAME}) by @${AUTHOR}" \
+              --body-file pr_body.md \
               --base main --head $UPDATE_BRANCH_NAME \
               --assignee $AUTHOR \
               --reviewer $AUTHOR
 
-            echo "✅ Created new PR for ${MODULE_COUNT} module updates"
+            echo "✅ Created new PR for ${MODULE_KEY} update"
           else
-            echo "✅ Updated existing PR #$EXISTING_PR for ${MODULE_COUNT} modules"
+            echo "✅ Updated existing PR #$EXISTING_PR for ${MODULE_KEY}"
           fi
 
           PR_URL=$(gh pr list --repo $CONTROL_REPO --head $UPDATE_BRANCH_NAME --json url --jq '.[0].url')
@@ -445,9 +359,9 @@ jobs:
           if [ -z "$PR_URL" ]; then
             COMMIT_SHA=$(git rev-parse HEAD)
             PR_URL="https://github.com/${CONTROL_REPO}/commit/${COMMIT_SHA}"
-            MSG="🔄 Updated ${MODULE_COUNT} module(s) in [terraform-control](${PR_URL}) (commit only)"
+            MSG="🔄 Updated \`${MODULE_KEY}\` in [terraform-control](${PR_URL}) (commit only, no PR)."
           else
-            MSG="📦 [Multi-module PR](${PR_URL}) - ${MODULE_COUNT} module(s) updated"
+            MSG="📦 Opened/updated terraform-control PR for \`${MODULE_KEY}\`: ${PR_URL}"
           fi
 
           echo "control_message=$MSG" >> $GITHUB_OUTPUT
@@ -490,4 +404,84 @@ jobs:
               Your changes are ready for deployment in \`${environment}\` environment!
 
               [View Workflow Run](${workflowUrl})`
+            });
+
+      # STEP 6: Handle failures and comment on PR
+      - name: Comment on PR with failure details
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Try to get PR number from different sources
+            let prNumber = null;
+            try {
+              prNumber = context.payload.issue?.number || '${{ steps.pr-details.outputs.pr_number }}' || null;
+            } catch (e) {
+              console.log('Could not determine PR number:', e);
+            }
+
+            if (!prNumber) {
+              console.log('No PR number available, skipping failure comment');
+              return;
+            }
+
+            // Determine which step failed based on available outputs
+            let failureStep = 'Unknown';
+            let failureDetails = '';
+
+            const prDetailsOutput = '${{ steps.pr-details.outputs.module_key }}';
+            const createTagOutput = '${{ steps.create-tag.outputs.new_tag }}';
+            const publishOutput = '${{ steps.publish.outputs.status }}';
+            const updateControlOutput = '${{ steps.update-control.outputs.control_message }}';
+
+            if (!prDetailsOutput) {
+              failureStep = 'PR Analysis';
+              failureDetails = 'Failed to analyze PR details or validate terraform module changes.';
+            } else if (!createTagOutput) {
+              failureStep = 'Tag Creation';
+              failureDetails = 'Failed to create or push the RC tag.';
+            } else if (!publishOutput) {
+              failureStep = 'Module Publishing';
+              failureDetails = 'Failed to publish the terraform module.';
+            } else if (!updateControlOutput) {
+              failureStep = 'Control Repo Update';
+              failureDetails = 'Failed to update the terraform-control repository.';
+            } else {
+              failureStep = 'Unknown';
+              failureDetails = 'The workflow failed at an unexpected step.';
+            }
+
+            const moduleKey = '${{ steps.pr-details.outputs.module_key }}' || 'Unknown';
+            const environment = '${{ steps.pr-details.outputs.environment }}' || 'Unknown';
+            const branchName = '${{ steps.pr-details.outputs.head_branch }}' || context.payload.issue?.pull_request?.head?.ref || 'Unknown';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: `❌ **Terraform RC Pipeline Failed**
+
+              ## 🚨 Failure Details
+              - **Failed Step**: ${failureStep}
+              - **Module**: \`${moduleKey}\`
+              - **Environment**: \`${environment}\`
+              - **Branch**: \`${branchName}\`
+
+              ## 📋 What Happened
+              ${failureDetails}
+
+              ## 🔧 Next Steps
+              1. Check the [workflow logs](${workflowUrl}) for detailed error messages
+              2. Fix the underlying issue in your PR
+              3. Comment \`ready-to-test-terraform-${environment}\` again to retry
+
+              ## 💡 Common Issues
+              - **PR Analysis failures**: Multiple modules changed, invalid comment format, or no terraform changes detected
+              - **Tag Creation failures**: Git permission issues or network problems
+              - **Publishing failures**: Registry authentication or module validation issues
+              - **Control Repo failures**: Missing terraform-control files or GitHub App permission issues
+
+              [View Full Workflow Run](${workflowUrl})`
             });
