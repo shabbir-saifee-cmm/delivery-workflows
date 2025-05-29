@@ -14,6 +14,9 @@ on:
       TF_AUTOMATION_APP_SECRET:
         description: 'github app secret for terraform-control repo access'
         required: true
+      MCK_CMM_HCP_TERRAFORM_TOKEN:
+        description: 'Terraform Cloud API Token'
+        required: true
 
 jobs:
   complete-pipeline:
@@ -77,6 +80,8 @@ jobs:
                   artifactConfig.terraform[currentModule].moduleName = line.split('moduleName:')[1].trim();
                 } else if (currentModule && line.includes('modulePath:')) {
                   artifactConfig.terraform[currentModule].modulePath = line.split('modulePath:')[1].trim();
+                } else if (currentModule && line.includes('moduleProvider:')) {
+                  artifactConfig.terraform[currentModule].moduleProvider = line.split('moduleProvider:')[1].trim();
                 }
               }
             } catch (error) {
@@ -153,6 +158,7 @@ jobs:
             const moduleConfig = artifactConfig.terraform[moduleKey];
             const moduleName = moduleConfig.moduleName || moduleKey;
             const modulePath = moduleConfig.modulePath;
+            const moduleProvider = moduleConfig.moduleProvider;
             const prAuthor = pr.user.login;
 
             core.setOutput("head_branch", pr.head.ref);
@@ -161,10 +167,11 @@ jobs:
             core.setOutput("module_key", moduleKey);
             core.setOutput("module_name", moduleName);
             core.setOutput("module_path", modulePath);
+            core.setOutput("module_provider", moduleProvider);
             core.setOutput("environment", environment);
             core.setOutput("pr_author", prAuthor);
 
-            core.info(`✅ Module Key: ${moduleKey}, Module Name: ${moduleName}, Module Path: ${modulePath}, Env: ${environment}`);
+            core.info(`✅ Module Key: ${moduleKey}, Module Name: ${moduleName}, Module Path: ${modulePath}, Provider: ${moduleProvider}, Env: ${environment}`);
 
       # STEP 2: Create RC tag for the changed module
       - name: Create new RC tag for module
@@ -236,27 +243,135 @@ jobs:
       # STEP 3: Publish terraform module
       - name: Publish terraform module
         id: publish
+        env:
+          TF_API_TOKEN: ${{ secrets.MCK_CMM_HCP_TERRAFORM_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
 
           MODULE_KEY="${{ steps.pr-details.outputs.module_key }}"
           MODULE_NAME="${{ steps.pr-details.outputs.module_name }}"
+          MODULE_PATH="${{ steps.pr-details.outputs.module_path }}"
+          MODULE_PROVIDER="${{ steps.pr-details.outputs.module_provider }}"
           NEW_TAG="${{ steps.create-tag.outputs.new_tag }}"
           NEW_VERSION="${{ steps.create-tag.outputs.new_version }}"
 
           echo "📦 Publishing module: $MODULE_KEY ($MODULE_NAME)"
+          echo "📦 Provider: $MODULE_PROVIDER"
+          echo "📦 Path: $MODULE_PATH"
           echo "📦 Tag: $NEW_TAG"
-          echo "📦 Version for control repo: $NEW_VERSION"
+          echo "📦 Version: $NEW_VERSION"
 
-          # Add your actual publishing logic here
-          # This could be:
-          # - Publishing to Terraform Cloud/Enterprise
-          # - Publishing to a private registry
-          # - Building and uploading artifacts
+          # Check if module registry exists
+          echo "Checking if module already exists in registry..."
+          echo
 
-          # Simulate publishing for now
-          sleep 2
-          echo "✅ Module published successfully"
+          MODULE_CHECK=$(curl -s --header "Authorization: Bearer $TF_API_TOKEN" \
+            --request GET \
+            https://app.terraform.io/api/v2/organizations/covermymeds/registry-modules/private/covermymeds/$MODULE_NAME/$MODULE_PROVIDER)
+
+          if echo "$MODULE_CHECK" | jq -e '.errors[] | select(.title | contains("not found"))' &> /dev/null; then
+            echo "Module does not exist in registry. Creating module..."
+            echo
+            cat > payload.json << EOF
+            {
+              "data": {
+                "type": "registry-modules",
+                "attributes": {
+                  "name": "$MODULE_NAME",
+                  "provider": "$MODULE_PROVIDER",
+                  "registry-name": "private",
+                  "no-code": false
+                }
+              }
+            }
+          EOF
+
+            curl -s --header "Authorization: Bearer $TF_API_TOKEN" \
+              --header "Content-Type: application/vnd.api+json" \
+              --request POST \
+              --data @payload.json \
+              https://app.terraform.io/api/v2/organizations/covermymeds/registry-modules
+
+            if [ $? -ne 0 ]; then
+              echo -e "\033[31mFailed to create module in registry.\033[0m"
+              exit 1
+            fi
+            echo "Module created successfully."
+            echo
+          else
+            echo "Module already exists in registry."
+            echo
+          fi
+
+          # Create new version for the module
+          echo "Creating module version $NEW_VERSION..."
+          echo
+
+          cat > version.json << EOF
+          {
+            "data": {
+              "type": "registry-module-versions",
+              "attributes": {
+                "version": "$NEW_VERSION"
+              }
+            }
+          }
+          EOF
+
+          VERSION_RESPONSE=$(curl -s --header "Authorization: Bearer $TF_API_TOKEN" \
+            --header "Content-Type: application/vnd.api+json" \
+            --request POST \
+            --data @version.json \
+            https://app.terraform.io/api/v2/organizations/covermymeds/registry-modules/private/covermymeds/$MODULE_NAME/$MODULE_PROVIDER/versions)
+
+          # Check for errors in the version creation
+          if echo "$VERSION_RESPONSE" | jq -e '.errors' > /dev/null; then
+            ERROR_DETAIL=$(echo "$VERSION_RESPONSE" | jq -r '.errors[0].detail')
+            echo -e "\033[31mError creating version\033[0m"
+            echo "$VERSION_RESPONSE" | jq
+
+            if [[ "$ERROR_DETAIL" == *"Version has already been taken"* ]]; then
+              echo -e "\033[31mVersion $NEW_VERSION already exists. Exiting...\033[0m"
+              exit 1
+            else
+              echo -e "\033[31mFailed to create version with unknown error.\033[0m"
+              exit 1
+            fi
+          fi
+
+          # Upload new module version
+          UPLOAD_URL=$(echo "$VERSION_RESPONSE" | jq -r '.data.links.upload')
+
+          if [ -z "$UPLOAD_URL" ] || [ "$UPLOAD_URL" == "null" ]; then
+            echo -e "\033[31mFailed to get upload URL from response.\033[0m"
+            echo "Response was: $VERSION_RESPONSE"
+            echo
+            exit 1
+          fi
+
+          echo "Got upload URL: $UPLOAD_URL"
+          echo
+
+          cd $MODULE_PATH
+
+          tar zcv --exclude='examples' --exclude='development' -f module.tar.gz *
+
+          # Upload the module archive
+          echo "Uploading module archive..."
+          echo
+
+          UPLOAD_RESPONSE=$(curl -s --header "Authorization: Bearer $TF_API_TOKEN" \
+            --header "Content-Type: application/octet-stream" \
+            --request PUT \
+            --data-binary @module.tar.gz \
+            $UPLOAD_URL)
+
+          if [ $? -ne 0 ]; then
+            echo -e "\033[31mFailed to upload module archive.\033[0m"
+            exit 1
+          fi
+
+          echo "✅ Module $MODULE_NAME version $NEW_VERSION successfully published to Terraform registry."
           echo "status=success" >> $GITHUB_OUTPUT
 
       # STEP 4: Update control repo
@@ -375,6 +490,7 @@ jobs:
             const moduleKey = '${{ steps.pr-details.outputs.module_key }}';
             const moduleName = '${{ steps.pr-details.outputs.module_name }}';
             const modulePath = '${{ steps.pr-details.outputs.module_path }}';
+            const moduleProvider = '${{ steps.pr-details.outputs.module_provider }}';
             const environment = '${{ steps.pr-details.outputs.environment }}';
             const branchName = '${{ steps.pr-details.outputs.head_branch }}';
             const controlMessage = '${{ steps.update-control.outputs.control_message }}';
@@ -390,6 +506,7 @@ jobs:
               - **Module Key**: \`${moduleKey}\`
               - **Module Name**: \`${moduleName}\`
               - **Module Path**: \`${modulePath}\`
+              - **Module Provider**: \`${moduleProvider}\`
               - **Environment**: \`${environment}\`
               - **Source Branch**: \`${branchName}\`
               - **RC Tag**: \`${newTag}\`
@@ -397,7 +514,7 @@ jobs:
 
               ## ✅ Pipeline Steps
               1. ✅ **Tag Created**: \`${newTag}\`
-              2. ✅ **Module Published**: Successfully published to Terraform registry
+              2. ✅ **Module Published**: Successfully published to Terraform Cloud registry
               3. ✅ **Control Repo Updated**: ${controlMessage}
 
               Your changes are ready for deployment in \`${environment}\` environment!
