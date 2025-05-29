@@ -45,7 +45,6 @@ jobs:
             const prNumber = context.payload.issue.number;
             const comment = context.payload.comment.body.trim();
             const commentPrefix = 'ready-to-test-terraform-';
-            const forbiddenEnvs = ['prod', 'production'];
 
             // Read artifact configuration from file
             const artifactConfigPath = '${{ inputs.artifactConfigPath }}';
@@ -98,8 +97,8 @@ jobs:
 
             const environment = envMatch[1].toLowerCase();
 
-            if (forbiddenEnvs.includes(environment)) {
-              core.setFailed(`❌ Automation not allowed for environment: ${environment}`);
+            if (!environment.includes('dev')) {
+              core.setFailed(`❌ Automation only allowed for environments containing 'dev'. Got: ${environment}`);
               return;
             }
 
