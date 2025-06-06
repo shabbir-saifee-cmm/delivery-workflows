@@ -142,10 +142,10 @@ jobs:
                 continue
               }
             else
-              helm template "$CHART_NAME" "$CHART_PATH" > "$CHART_OUTPUT_DIR/current.yaml" || {
+              helm template "$CHART_NAME" "$CHART_PATH" --dependency-update > "$CHART_OUTPUT_DIR/current.yaml" || {
                 echo "❌ Failed to template current branch for $CHART_NAME"
                 HAS_ERRORS=true
-                echo "TEMPLATE_ERROR: Failed to template current branch" > "$CHART_OUTPUT_DIR/error.txt"
+                echo "TEMPLATE_ERROR: Failed to template current branch" --dependency-update > "$CHART_OUTPUT_DIR/error.txt"
                 continue
               }
             fi
@@ -167,12 +167,12 @@ jobs:
               if [ -d "/tmp/$CHART_PATH" ]; then
                 # Template main branch chart
                 if [ -f "/tmp/$CHART_PATH/values.yaml" ]; then
-                  helm template "$CHART_NAME" "/tmp/$CHART_PATH" -f "/tmp/$CHART_PATH/values.yaml" > "$CHART_OUTPUT_DIR/main.yaml" || {
+                  helm template "$CHART_NAME" "/tmp/$CHART_PATH" -f "/tmp/$CHART_PATH/values.yaml" --dependency-update > "$CHART_OUTPUT_DIR/main.yaml" || {
                     echo "⚠️ Failed to template main branch for $CHART_NAME"
                     echo "TEMPLATE_ERROR: Failed to template main branch" > "$CHART_OUTPUT_DIR/main.yaml"
                   }
                 else
-                  helm template "$CHART_NAME" "/tmp/$CHART_PATH" > "$CHART_OUTPUT_DIR/main.yaml" || {
+                  helm template "$CHART_NAME" "/tmp/$CHART_PATH" --dependency-update > "$CHART_OUTPUT_DIR/main.yaml" || {
                     echo "⚠️ Failed to template main branch for $CHART_NAME"
                     echo "TEMPLATE_ERROR: Failed to template main branch" > "$CHART_OUTPUT_DIR/main.yaml"
                   }
