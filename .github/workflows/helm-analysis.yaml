@@ -135,10 +135,10 @@ jobs:
             # Generate current branch manifests (always use values.yaml)
             echo "📦 Templating current branch manifests..."
             if [ -f "$CHART_PATH/values.yaml" ]; then
-              helm template "$CHART_NAME" "$CHART_PATH" -f "$CHART_PATH/values.yaml" > "$CHART_OUTPUT_DIR/current.yaml" || {
+              helm template "$CHART_NAME" "$CHART_PATH" -f "$CHART_PATH/values.yaml" --dependency-update > "$CHART_OUTPUT_DIR/current.yaml" || {
                 echo "❌ Failed to template current branch for $CHART_NAME"
                 HAS_ERRORS=true
-                echo "TEMPLATE_ERROR: Failed to template current branch" > "$CHART_OUTPUT_DIR/error.txt"
+                echo "TEMPLATE_ERROR: Failed to template current branch" --dependency-update > "$CHART_OUTPUT_DIR/error.txt"
                 continue
               }
             else
