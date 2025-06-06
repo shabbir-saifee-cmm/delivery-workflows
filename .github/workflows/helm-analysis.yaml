@@ -1,0 +1,423 @@
+name: Helm Chart Diff and Validation
+
+on:
+  workflow_call:
+    inputs:
+      chartsPaths:
+        description: 'Comma-separated list of paths where Helm charts can be found (e.g., "helm,apps/charts" or "cluster1/helm-charts,cluster2/helm-charts")'
+        required: true
+        type: string
+
+jobs:
+  helm-diff-validation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'latest'
+
+      - name: Find changed Helm charts
+        id: find-charts
+        run: |
+          set -e
+
+          CHARTS_PATHS="${{ inputs.chartsPaths }}"
+          echo "🔍 Looking for Helm charts in paths: $CHARTS_PATHS"
+
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+          echo "📋 Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Convert comma-separated paths to array
+          IFS=',' read -ra PATHS_ARRAY <<< "$CHARTS_PATHS"
+
+          # Find charts that have changes
+          CHANGED_CHARTS=()
+
+          for CHARTS_PATH in "${PATHS_ARRAY[@]}"; do
+            # Remove leading/trailing whitespace and ./ prefix
+            CHARTS_PATH=$(echo "$CHARTS_PATH" | xargs | sed 's|^\./||')
+            echo "🔍 Scanning path: $CHARTS_PATH"
+
+            if [ -d "$CHARTS_PATH" ]; then
+              # Find all helm charts in this path (including nested directories)
+              find "$CHARTS_PATH" -name "Chart.yaml" -type f | while read -r CHART_FILE; do
+                CHART_DIR=$(dirname "$CHART_FILE")
+                CHART_NAME=$(basename "$CHART_DIR")
+                RELATIVE_CHART_PATH="$CHART_DIR"
+
+                echo "🔍 Found chart: $CHART_NAME at $RELATIVE_CHART_PATH"
+
+                # Check if any files in this chart directory were changed
+                if echo "$CHANGED_FILES" | grep -q "^$RELATIVE_CHART_PATH/"; then
+                  echo "✅ Found changes in chart: $CHART_NAME ($RELATIVE_CHART_PATH)"
+                  # Store both chart name and full path for processing
+                  echo "$CHART_NAME|$RELATIVE_CHART_PATH" >> /tmp/changed_charts.txt
+                fi
+              done
+            else
+              echo "⚠️ Path does not exist: $CHARTS_PATH"
+            fi
+          done
+
+          # Process results
+          if [ -f /tmp/changed_charts.txt ]; then
+            # Remove duplicates (same chart name in different paths)
+            sort /tmp/changed_charts.txt | uniq > /tmp/unique_changed_charts.txt
+
+            CHANGED_CHARTS_COUNT=$(wc -l < /tmp/unique_changed_charts.txt)
+
+            if [ "$CHANGED_CHARTS_COUNT" -gt 0 ]; then
+              echo "📦 Found $CHANGED_CHARTS_COUNT changed charts:"
+              cat /tmp/unique_changed_charts.txt
+
+              # Create output format: "chart1|path1,chart2|path2"
+              CHANGED_CHARTS_OUTPUT=$(tr '\n' ',' < /tmp/unique_changed_charts.txt | sed 's/,$//')
+              echo "changed_charts=$CHANGED_CHARTS_OUTPUT" >> $GITHUB_OUTPUT
+              echo "changed_charts_count=$CHANGED_CHARTS_COUNT" >> $GITHUB_OUTPUT
+            else
+              echo "changed_charts_count=0" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "ℹ️ No Helm chart changes detected"
+            echo "changed_charts_count=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Process Helm chart diffs and validation
+        id: process-charts
+        if: steps.find-charts.outputs.changed_charts_count != '0'
+        run: |
+          set -e
+
+          CHANGED_CHARTS="${{ steps.find-charts.outputs.changed_charts }}"
+          SKIP_VALIDATION="${{ inputs.skipValidation }}"
+
+          # Create output directory
+          mkdir -p /tmp/helm-outputs
+
+          # Convert comma-separated charts to array (format: "chart1|path1,chart2|path2")
+          IFS=',' read -ra CHARTS_ARRAY <<< "$CHANGED_CHARTS"
+
+          RESULTS_SUMMARY=""
+          HAS_ERRORS=false
+
+          for CHART_ENTRY in "${CHARTS_ARRAY[@]}"; do
+            # Split chart name and path
+            IFS='|' read -ra CHART_PARTS <<< "$CHART_ENTRY"
+            CHART_NAME="${CHART_PARTS[0]}"
+            CHART_PATH="${CHART_PARTS[1]}"
+
+            echo "🔄 Processing chart: $CHART_NAME at $CHART_PATH"
+
+            # Create chart-specific output directory
+            CHART_OUTPUT_DIR="/tmp/helm-outputs/$CHART_NAME"
+            mkdir -p "$CHART_OUTPUT_DIR"
+
+            # Check if chart exists on main branch
+            CHART_EXISTS_ON_MAIN=false
+            if git show origin/main:"$CHART_PATH/Chart.yaml" > /dev/null 2>&1; then
+              CHART_EXISTS_ON_MAIN=true
+              echo "📋 Chart exists on main branch"
+            else
+              echo "🆕 New chart - not present on main branch"
+            fi
+
+            # Generate current branch manifests (always use values.yaml)
+            echo "📦 Templating current branch manifests..."
+            if [ -f "$CHART_PATH/values.yaml" ]; then
+              helm template "$CHART_NAME" "$CHART_PATH" -f "$CHART_PATH/values.yaml" > "$CHART_OUTPUT_DIR/current.yaml" || {
+                echo "❌ Failed to template current branch for $CHART_NAME"
+                HAS_ERRORS=true
+                echo "TEMPLATE_ERROR: Failed to template current branch" > "$CHART_OUTPUT_DIR/error.txt"
+                continue
+              }
+            else
+              helm template "$CHART_NAME" "$CHART_PATH" > "$CHART_OUTPUT_DIR/current.yaml" || {
+                echo "❌ Failed to template current branch for $CHART_NAME"
+                HAS_ERRORS=true
+                echo "TEMPLATE_ERROR: Failed to template current branch" > "$CHART_OUTPUT_DIR/error.txt"
+                continue
+              }
+            fi
+
+            # Generate main branch manifests (if chart exists)
+            if [ "$CHART_EXISTS_ON_MAIN" = true ]; then
+              echo "📦 Templating main branch manifests..."
+
+              # Extract chart from main branch to temp directory
+              TEMP_CHART_DIR="/tmp/main-$CHART_NAME"
+              mkdir -p "$(dirname "/tmp/$CHART_PATH")"
+
+              # Extract chart from main branch
+              git archive origin/main -- "$CHART_PATH" | tar -x -C "/tmp/" 2>/dev/null || {
+                echo "⚠️ Could not extract chart from main branch"
+                echo "NEW_CHART: Could not extract from main" > "$CHART_OUTPUT_DIR/main.yaml"
+              }
+
+              if [ -d "/tmp/$CHART_PATH" ]; then
+                # Template main branch chart
+                if [ -f "/tmp/$CHART_PATH/values.yaml" ]; then
+                  helm template "$CHART_NAME" "/tmp/$CHART_PATH" -f "/tmp/$CHART_PATH/values.yaml" > "$CHART_OUTPUT_DIR/main.yaml" || {
+                    echo "⚠️ Failed to template main branch for $CHART_NAME"
+                    echo "TEMPLATE_ERROR: Failed to template main branch" > "$CHART_OUTPUT_DIR/main.yaml"
+                  }
+                else
+                  helm template "$CHART_NAME" "/tmp/$CHART_PATH" > "$CHART_OUTPUT_DIR/main.yaml" || {
+                    echo "⚠️ Failed to template main branch for $CHART_NAME"
+                    echo "TEMPLATE_ERROR: Failed to template main branch" > "$CHART_OUTPUT_DIR/main.yaml"
+                  }
+                fi
+              else
+                echo "NEW_CHART: Chart directory not found on main" > "$CHART_OUTPUT_DIR/main.yaml"
+              fi
+            else
+              echo "NEW_CHART: This is a new chart" > "$CHART_OUTPUT_DIR/main.yaml"
+            fi
+
+            # Generate diff
+            echo "🔄 Generating diff..."
+            if [ -f "$CHART_OUTPUT_DIR/main.yaml" ] && ! grep -q "NEW_CHART\|TEMPLATE_ERROR" "$CHART_OUTPUT_DIR/main.yaml"; then
+              diff -u "$CHART_OUTPUT_DIR/main.yaml" "$CHART_OUTPUT_DIR/current.yaml" > "$CHART_OUTPUT_DIR/diff.txt" || true
+              if [ -s "$CHART_OUTPUT_DIR/diff.txt" ]; then
+                echo "📝 Diff generated for $CHART_NAME"
+              else
+                echo "ℹ️ No differences found for $CHART_NAME"
+                echo "No changes detected" > "$CHART_OUTPUT_DIR/diff.txt"
+              fi
+            else
+              echo "📝 New chart - showing full manifest"
+              echo "=== NEW CHART: $CHART_NAME ===" > "$CHART_OUTPUT_DIR/diff.txt"
+              cat "$CHART_OUTPUT_DIR/current.yaml" >> "$CHART_OUTPUT_DIR/diff.txt"
+            fi
+
+            # Kubeconform validation with sensible defaults
+            if [ "$SKIP_VALIDATION" != "true" ]; then
+              echo "🔍 Running kubeconform validation..."
+
+              # Use sensible default kubeconform arguments
+              docker run --rm -v "$CHART_OUTPUT_DIR:/workdir" \
+                ghcr.io/yannh/kubeconform:latest \
+                -summary -output json \
+                -schema-location default \
+                -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+                -ignore-missing-schemas \
+                -verbose \
+                /workdir/current.yaml > "$CHART_OUTPUT_DIR/validation.json" 2>&1 || {
+                echo "⚠️ Kubeconform validation had issues for $CHART_NAME"
+                # Don't fail the entire process for validation issues
+              }
+
+              # Check validation results
+              if [ -f "$CHART_OUTPUT_DIR/validation.json" ]; then
+                if grep -q '"status":"valid"' "$CHART_OUTPUT_DIR/validation.json" 2>/dev/null; then
+                  echo "✅ Kubeconform validation passed for $CHART_NAME"
+                else
+                  echo "⚠️ Kubeconform validation found issues for $CHART_NAME"
+                  HAS_ERRORS=true
+                fi
+              else
+                echo "⚠️ No validation output generated for $CHART_NAME"
+                echo '{"error": "No validation output generated"}' > "$CHART_OUTPUT_DIR/validation.json"
+              fi
+            else
+              echo "⏭️ Skipping kubeconform validation"
+              echo '{"status": "skipped", "message": "Validation was skipped"}' > "$CHART_OUTPUT_DIR/validation.json"
+            fi
+
+            echo "✅ Completed processing chart: $CHART_NAME"
+          done
+
+          # Set overall status
+          if [ "$HAS_ERRORS" = true ]; then
+            echo "has_errors=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_errors=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "📊 Processing completed for all charts"
+
+      - name: Generate PR comment
+        if: steps.find-charts.outputs.changed_charts_count != '0'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const changedCharts = '${{ steps.find-charts.outputs.changed_charts }}';
+            const hasErrors = '${{ steps.process-charts.outputs.has_errors }}' === 'true';
+            const skipValidation = '${{ inputs.skipValidation }}' === 'true';
+
+            if (!changedCharts) {
+              console.log('No charts to process');
+              return;
+            }
+
+            // Parse chart entries (format: "chart1|path1,chart2|path2")
+            const chartEntries = changedCharts.split(',').map(entry => {
+              const [name, chartPath] = entry.split('|');
+              return { name: name.trim(), path: chartPath.trim() };
+            });
+
+            const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            let commentBody = '';
+
+            // Header
+            const statusIcon = hasErrors ? '⚠️' : '✅';
+            const statusText = hasErrors ? 'Helm Charts Analysis (With Issues)' : 'Helm Charts Analysis';
+
+            commentBody += `${statusIcon} **${statusText}**\n\n`;
+            commentBody += `Analyzed ${chartEntries.length} changed Helm chart${chartEntries.length > 1 ? 's' : ''}.\n\n`;
+
+            // Process each chart
+            for (const chart of chartEntries) {
+              const chartName = chart.name;
+              const chartPath = chart.path;
+              const chartOutputDir = `/tmp/helm-outputs/${chartName}`;
+
+              commentBody += `## 📦 Chart: \`${chartName}\`\n`;
+              commentBody += `**Path:** \`${chartPath}\`\n\n`;
+
+              try {
+                // Read diff
+                const diffPath = path.join(chartOutputDir, 'diff.txt');
+                let diffContent = '';
+                if (fs.existsSync(diffPath)) {
+                  diffContent = fs.readFileSync(diffPath, 'utf8');
+
+                  if (diffContent.includes('NEW_CHART:')) {
+                    commentBody += `🆕 **New Chart Detected**\n\n`;
+                    commentBody += `<details>\n<summary>📄 View Full Manifest (${chartName})</summary>\n\n`;
+                    commentBody += '```yaml\n';
+                    const currentPath = path.join(chartOutputDir, 'current.yaml');
+                    if (fs.existsSync(currentPath)) {
+                      const currentContent = fs.readFileSync(currentPath, 'utf8');
+                      // Truncate if too long
+                      if (currentContent.length > 10000) {
+                        commentBody += currentContent.substring(0, 10000) + '\n\n... (truncated - see workflow logs for full output)\n';
+                      } else {
+                        commentBody += currentContent;
+                      }
+                    }
+                    commentBody += '```\n</details>\n\n';
+                  } else if (diffContent.includes('No changes detected')) {
+                    commentBody += `ℹ️ **No manifest changes detected**\n\n`;
+                  } else {
+                    commentBody += `<details>\n<summary>📋 View Diff (${chartName})</summary>\n\n`;
+                    commentBody += '```diff\n';
+                    // Truncate if too long
+                    if (diffContent.length > 8000) {
+                      commentBody += diffContent.substring(0, 8000) + '\n\n... (truncated - see workflow logs for full diff)\n';
+                    } else {
+                      commentBody += diffContent;
+                    }
+                    commentBody += '```\n</details>\n\n';
+                  }
+                } else {
+                  commentBody += `⚠️ **Could not generate diff**\n\n`;
+                }
+
+                // Read validation results
+                if (!skipValidation) {
+                  const validationPath = path.join(chartOutputDir, 'validation.json');
+                  if (fs.existsSync(validationPath)) {
+                    const validationContent = fs.readFileSync(validationPath, 'utf8');
+
+                    try {
+                      const validation = JSON.parse(validationContent);
+
+                      if (validation.status === 'skipped') {
+                        commentBody += `⏭️ **Validation:** Skipped\n\n`;
+                      } else if (validation.status === 'valid' || validationContent.includes('"status":"valid"')) {
+                        commentBody += `✅ **Validation:** All manifests are valid\n\n`;
+                      } else {
+                        commentBody += `<details>\n<summary>⚠️ Validation Issues (${chartName})</summary>\n\n`;
+                        commentBody += '```json\n';
+                        commentBody += validationContent;
+                        commentBody += '```\n</details>\n\n';
+                      }
+                    } catch (e) {
+                      // Handle non-JSON output
+                      if (validationContent.includes('valid')) {
+                        commentBody += `✅ **Validation:** Passed\n\n`;
+                      } else {
+                        commentBody += `<details>\n<summary>⚠️ Validation Output (${chartName})</summary>\n\n`;
+                        commentBody += '```\n';
+                        commentBody += validationContent;
+                        commentBody += '```\n</details>\n\n';
+                      }
+                    }
+                  } else {
+                    commentBody += `⚠️ **Validation:** No output generated\n\n`;
+                  }
+                }
+
+              } catch (error) {
+                commentBody += `❌ **Error processing chart:** ${error.message}\n\n`;
+              }
+
+              commentBody += '---\n\n';
+            }
+
+            // Footer
+            commentBody += `[View Workflow Run](${workflowUrl})`;
+
+            // Find existing comment to update
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existingComment = comments.find(comment =>
+              comment.body.includes('Helm Charts Analysis') &&
+              comment.user.type === 'Bot'
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+      - name: Comment when no charts changed
+        if: steps.find-charts.outputs.changed_charts_count == '0'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const workflowUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const chartsPaths = '${{ inputs.chartsPaths }}';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `📦 **Helm Charts Analysis**
+
+              No Helm chart changes detected in this PR.
+
+              **Searched paths:** \`${chartsPaths}\`
+
+              [View Workflow Run](${workflowUrl})`
+            });
